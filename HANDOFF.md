@@ -19,24 +19,33 @@ The design document already embeds the following Mermaid diagrams:
 These diagrams are part of the PRD and should be copied into any hand‑off repository so the next team has visual context.
 
 ---
-## 3. Testing Strategy (must be 100 % before any code is merged)
-1. **Pure‑function unit tests** – for all modules that contain no external I/O:
-   - `risk_schedule.py` – capital‑tier tables, risk per trade calculation.
-   - `position_sizing.py` – loss‑per‑BTC (`L`), lot rounding, net‑RR gate.
-   - `daily_cap.py` – reset at 02:00 Lagos (01:00 UTC).
-   - `trend_extractor.py` – swing‑low, leg detection on synthetic candles.
-2. **Integration tests** – using the **FakeAdapter** (backtest) to verify:
-   - Signal → RiskEngine → OrderRequest flow.
-   - Exit‑policy variants A‑D produce the expected order sequence.
-   - Daily‑cap enforcement across midnight boundary.
-3. **End‑to‑end scenario tests** – run the full FastAPI app against the fake adapter:
-   - Submit a strategy signal via HTTP endpoint, assert correct DB entries and alert messages.
-   - Restart the app with an open position, verify protective orders are re‑loaded and duplicate‑order protection works.
-4. **Coverage & Reporting** – use `pytest --cov=src` and generate an HTML report.  The CI pipeline must fail if coverage < 95 %.
-5. **Test Artefacts** – commit the following to the repository before any build:
-   - `tests/` directory with all test modules.
-   - `pytest.ini` (default timeout 30s, markers for integration).
-   - `coverage.xml` (generated after a clean test run) – to be reviewed by the reviewer.
+## 3. Testing Strategy (100% Coverage & Visible Test Cases)
+Every single component will have dedicated, isolated test files stored in the `tests/` directory:
+- `tests/test_risk_schedule.py`: Tests capital tier tables, risk per trade calculation, half-risk counter-trend rules.
+- `tests/test_position_sizing.py`: Tests loss per BTC (`L`), lot-size floor rounding, minimum exchange notional.
+- `tests/test_net_rr_gate.py`: Tests friction calculation (entry/exit fees + slippage) and the 2.0 Net RR filter.
+- `tests/test_daily_cap.py`: Tests 2-trade limit and midnight 02:00 Lagos (01:00 UTC) boundary reset.
+- `tests/test_strategy_fsm.py`: Tests 1h/15m/2m candle fixtures, liquidity sweep validation, and 3-candle entry triggers.
+- `tests/test_exit_policy.py`: Tests TP1 (ceil 70% lots), TP2 (5R), Breakeven at 1.5R, and Early Exit at 1.0R / 50% pullback.
+- `tests/test_demo_gate.py`: Tests the 24-hour runtime and ≥20 clean trades requirement before live trading unlock.
+- `tests/test_fake_adapter.py`: Backtest replay engine simulating Bybit order matching.
+- `tests/test_wallet_ledger.py`: Internal wallet transfers, PnL settlements, and 24-hour withdrawal lock timer.
+- `tests/test_api_dashboard.py`: FastAPI endpoints, JWT/Basic authentication, credential vault, and Kill Switch.
+
+All test runs will output detailed test reports and coverage figures visible in the repo (`htmlcov/`, `pytest.xml`).
+
+---
+## 4. Git Repository & Remote Setup
+The local repository has been initialized with the `main` branch.
+
+To push this repository to GitHub:
+1. Create a new empty repository on your GitHub account (e.g., `trading-bot-bybit`).
+2. Link your local project to your GitHub repository:
+   ```bash
+   git remote add origin https://github.com/<YOUR_USERNAME>/<REPO_NAME>.git
+   git push -u origin main
+   ```
+3. Whenever we begin building, every component and its corresponding test file will be committed and pushed immediately.
 
 ---
 ## 4. Handoff Checklist
