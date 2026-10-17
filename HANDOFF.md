@@ -1,4 +1,4 @@
-# Handoff and Status (v1.3, 2026-10-17)
+# Handoff and Status (v1.4, 2026-10-17)
 
 **Update this file every time the work changes, and prepare a fresh copy whenever usage is about to run out.**
 
@@ -7,8 +7,9 @@
 - Repo: https://github.com/panthera2020/BOT_Project.git (`main`). Local copy: `C:\Users\HP\Downloads\My Bot project`.
 - Stack: Python 3.10+ (`asyncio`), FastAPI, Uvicorn, HTTPX, Aiosqlite, Docker.
 - The strategy, risk and exit logic exist and have unit tests. The web console is deployed, but **it does not run the strategy yet** (section 4).
-- Admin login failed on the deployed page because the sign-in form described in the old handoff (v1.2) was never pushed to GitHub (section 3). A fix is in the patch that came with this file.
-- The test suite was **not run in the session that wrote v1.3** (the sandbox could not reach PyPI). Run `pytest -q` locally before pushing (section 6).
+- Admin login failed on the deployed page because the sign-in form described in the old handoff (v1.2) was never pushed to GitHub (section 3). The fix is on `main` (v1.3 commit `4a84047`).
+- v1.4 fixes the demo gate (24h and 20 clean trades): the clock now starts at the first "Start Demo Testing" and, together with the clean-trade count, is saved in SQLite so a restart no longer resets it (section 4). The loop that actually places demo trades is still not built, so the count stays at 0 until it is.
+- Tests: `pytest -q` gives 48 passed (run in the v1.4 session, in several test orders), and a real uvicorn restart was smoke-tested. The sign-in page itself has not been opened in a browser.
 
 ## 2. What exists in the code
 
@@ -17,6 +18,7 @@
 | Strategy 1 state machine | `src/strategy/strategy1.py` | 1h bias, 15m sweep, 2m trigger |
 | Risk schedule, sizing, net RR gate | `src/core/risk_schedule.py`, `position_sizing.py`, `net_rr_gate.py` | |
 | Daily cap (2 trades, 2am Lagos = 01:00 UTC) | `src/core/daily_cap.py` | |
+| Demo gate (24h and 20 clean trades) | `src/core/demo_gate.py` | Pure rule; `tests/test_demo_gate.py` |
 | Exit policy | `src/core/exit_policy.py` | TP1 70%, TP2 5R, breakeven, early exit |
 | Exchange adapters | `src/exchange/adapter.py`, `bybit_adapter.py` | Fake adapter and Bybit V5 REST |
 | Alerts | `src/alerts/notifier.py` | Telegram via HTTPX; email dispatcher |
@@ -41,9 +43,10 @@ Not built yet: the bot wallet ledger and 24-hour withdrawal lock, a backtest run
 ## 4. Known gaps (read before trusting the dashboard)
 
 - "Start Demo Testing" and "Start Live Trading" only flip flags in `RUNTIME_STATE`. Nothing in `src/` calls `Strategy1StateMachine`, so the Market Radar text and "last scan" time are static. `BotEngine` in `src/main.py` only has `start` and `stop`.
-- `clean_demo_trade_count` is never incremented, so the 24h and 20-trade gate cannot unlock live trading from real trades.
-- `src/web/app.py` seeds one made-up demo trade (about +2.16R) so the stats are not empty. Remove it when real trades are wired in.
-- All console state (API keys, Telegram settings, flags, trades) lives in memory and is lost on every restart or sleep. `DATABASE_URL` is set in the Dockerfile, but the console does not use the SQLite store for these yet. API keys are stored unencrypted in memory.
+- **Demo gate (fixed in v1.4, but nothing feeds it yet).** The rule is live >= 24h since the first "Start Demo Testing" AND >= 20 clean demo trades. The clock is not reset by pausing or restarting. Before v1.4 the clock started at server boot and the count was never incremented. `record_demo_trade(...)` in `src/web/app.py` is now the single place a closed demo trade is recorded and counted; **the engine must call it when a demo trade closes**, and nothing does yet. What counts as "clean" is still an open PRD decision: the default counts every properly closed demo trade, and the caller can pass `clean=False`.
+- The clock and clean-trade count are saved to the SQLite file in `DATABASE_URL` (`/data/trading_bot.db` in the Docker image) and reloaded on startup. **This only survives a restart if `/data` is on a persistent disk.** On hosts with an ephemeral filesystem (Back4app and Render free tiers) the file is lost on redeploy, and the 24h clock restarts. If `DATABASE_URL` is unset (local runs, tests) nothing is saved.
+- `src/web/app.py` seeds one made-up demo trade (about +2.16R) so the stats are not empty. It does not count toward the gate. Remove it when real trades are wired in.
+- The rest of the console state (API keys, Telegram settings, the demo/live on-off flags, the trade list and stats) still lives in memory and is lost on every restart or sleep, so after a restart the bot comes back stopped. API keys are stored unencrypted in memory.
 
 ## 5. Hosting
 
@@ -64,11 +67,10 @@ pip install -e . pytest pytest-asyncio
 pytest -q
 ```
 
-Apply and push the v1.3 patch:
+Get the latest code (the v1.3 login fix and the v1.4 demo gate are both on `main`):
 
 ```bash
-git am 0001-*.patch      # or: git apply 0001-*.patch
-git push origin main
+git pull origin main
 ```
 
 Run locally with your own credentials:
@@ -81,10 +83,10 @@ uvicorn src.web.app:app --port 8080
 
 ## 7. Next steps, in order
 
-1. Run the tests, apply the patch, push, set `ADMIN_USER` and `ADMIN_PASS` on the host, redeploy, and confirm you can sign in.
+1. Set `ADMIN_USER` and `ADMIN_PASS` on the host, redeploy from `main`, and confirm you can sign in.
 2. Choose a host that can stay up (section 5).
-3. Wire the engine: candle polling, `Strategy1StateMachine`, risk and net RR gates, demo orders on Bybit demo, trade logging, and the clean-trade counter. Remove the seeded trade.
-4. Persist keys (encrypted) and console state in SQLite.
+3. Wire the engine: candle polling, `Strategy1StateMachine`, risk and net RR gates, demo orders on Bybit demo, and a call to `record_demo_trade(...)` when each demo trade closes (this is what makes the gate unlock). Remove the seeded trade.
+4. Persist keys (encrypted), the trade list and the on/off flags in SQLite. Gate state is already saved (v1.4).
 5. Build the wallet ledger and 24-hour withdrawal lock, then the backtest runner.
 6. Open decisions from the PRD: risk guard below $50, leverage tiers (100x from $10 to $50, 50x above, below $10 no trading), alert channel, and how many clean demo trades before live.
 

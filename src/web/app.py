@@ -6,6 +6,7 @@ import os
 import asyncio
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -14,10 +15,20 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from src.core.daily_cap import get_trading_day_id
+from src.core.demo_gate import evaluate_demo_gate
 from src.core.trade_stats import TradeStatsTracker
 from src.alerts.notifier import AlertDispatcher
+from src.storage.state_store import StateStore
 
-app = FastAPI(title="Trading Bot Operations Console", version="1.1.0")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Restore the demo clock and clean-trade count saved before the last restart.
+    await load_persisted_state()
+    yield
+
+
+app = FastAPI(title="Trading Bot Operations Console", version="1.1.0", lifespan=_lifespan)
 # auto_error=False so a missing Authorization header returns our own 401 without a
 # WWW-Authenticate challenge. That challenge triggers the browser's native login
 # popup, which reverse proxies on free hosts often suppress; the page signs in
@@ -57,7 +68,7 @@ RUNTIME_STATE = {
     "live_trading_active": False,
     "current_mode": "DEMO",  # DEMO or LIVE
     "is_live_trading_unlocked": False,
-    "demo_run_start_time": datetime.now(timezone.utc),
+    "demo_run_start_time": None,  # set when Start Demo Testing is first pressed
     "clean_demo_trade_count": 0,
     "bybit_demo_keys": {"api_key": "", "api_secret": ""},
     "bybit_live_keys": {"api_key": "", "api_secret": ""},
@@ -65,6 +76,75 @@ RUNTIME_STATE = {
     "active_position": None,  # Simulated active position
     "telegram_config": {"bot_token": "", "chat_id": ""},
 }
+
+# The demo clock and clean-trade count are saved here so a restart does not reset the
+# 24h / 20-trade gate. DATABASE_URL is set in the Dockerfile (/data/trading_bot.db).
+# When it is unset (local runs, tests) nothing is saved. The file only survives
+# restarts if /data sits on a persistent disk; on hosts with an ephemeral filesystem
+# it is lost on every redeploy.
+STATE_DB_PATH = os.environ.get("DATABASE_URL", "")
+_KEY_DEMO_START = "demo_run_start_time"
+_KEY_CLEAN_TRADES = "clean_demo_trade_count"
+
+
+async def _persist_state(key: str, value: str) -> None:
+    if not STATE_DB_PATH:
+        return
+    try:
+        store = StateStore(db_path=STATE_DB_PATH)
+        await store.init_db()
+        await store.set_state(key, value)
+    except Exception as exc:  # never let a storage problem take the console down
+        logger.warning("Could not save %s to %s: %s", key, STATE_DB_PATH, exc)
+
+
+async def load_persisted_state() -> None:
+    """Restore the demo clock and clean-trade count saved before the last restart."""
+    if not STATE_DB_PATH:
+        return
+    try:
+        store = StateStore(db_path=STATE_DB_PATH)
+        await store.init_db()
+        started = await store.get_state(_KEY_DEMO_START)
+        count = await store.get_state(_KEY_CLEAN_TRADES)
+        if started:
+            RUNTIME_STATE["demo_run_start_time"] = datetime.fromisoformat(started)
+        if count is not None:
+            RUNTIME_STATE["clean_demo_trade_count"] = int(count)
+    except Exception as exc:
+        logger.warning("Could not load saved state from %s: %s", STATE_DB_PATH, exc)
+
+
+async def record_demo_trade(
+    symbol: str,
+    side: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    pnl_usd: float,
+    pnl_r: float,
+    clean: bool = True,
+):
+    """The one place a closed demo trade is recorded. The trading engine calls this.
+
+    Adds the trade to the stats and, when it is clean, counts it toward the 20-trade
+    gate and saves the new count. What counts as "clean" is still an open decision in
+    the PRD; the caller decides, and the default counts every properly closed trade.
+    """
+    trade = STATS_TRACKER.record_completed_trade(
+        mode="DEMO",
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        pnl_usd=pnl_usd,
+        pnl_r=pnl_r,
+    )
+    if clean:
+        RUNTIME_STATE["clean_demo_trade_count"] += 1
+        await _persist_state(_KEY_CLEAN_TRADES, str(RUNTIME_STATE["clean_demo_trade_count"]))
+    return trade
 
 
 def _credentials_valid(username: str, password: str) -> bool:
@@ -127,12 +207,11 @@ async def serve_dashboard():
 @app.get("/api/status")
 async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
-    demo_duration = now - RUNTIME_STATE["demo_run_start_time"]
-    has_24h = demo_duration >= timedelta(hours=24)
-    has_20_trades = RUNTIME_STATE["clean_demo_trade_count"] >= 20
-    is_qualified = has_24h and has_20_trades
+    gate = evaluate_demo_gate(
+        RUNTIME_STATE["demo_run_start_time"], RUNTIME_STATE["clean_demo_trade_count"], now=now
+    )
 
-    RUNTIME_STATE["is_live_trading_unlocked"] = is_qualified
+    RUNTIME_STATE["is_live_trading_unlocked"] = gate.is_unlocked
 
     demo_stats = STATS_TRACKER.get_stats("DEMO")
     live_stats = STATS_TRACKER.get_stats("LIVE")
@@ -157,11 +236,11 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
         "active_position": RUNTIME_STATE["active_position"],
         "market_radar": radar_state,
         "demo_qualification": {
-            "elapsed_hours": round(demo_duration.total_seconds() / 3600.0, 2),
-            "clean_trades": RUNTIME_STATE["clean_demo_trade_count"],
-            "has_24h_run": has_24h,
-            "has_20_clean_trades": has_20_trades,
-            "is_live_unlocked": is_qualified,
+            "elapsed_hours": gate.elapsed_hours,
+            "clean_trades": gate.clean_trades,
+            "has_24h_run": gate.has_24h_run,
+            "has_20_clean_trades": gate.has_20_clean_trades,
+            "is_live_unlocked": gate.is_unlocked,
         },
         "stats": {
             "demo": demo_stats,
@@ -225,6 +304,11 @@ async def start_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[st
     """
     Starts unrestricted demo strategy testing (NO daily cap).
     """
+    # The 24h clock starts the first time demo testing is started and is not reset by
+    # pausing, stopping or restarting.
+    if RUNTIME_STATE["demo_run_start_time"] is None:
+        RUNTIME_STATE["demo_run_start_time"] = datetime.now(timezone.utc)
+        await _persist_state(_KEY_DEMO_START, RUNTIME_STATE["demo_run_start_time"].isoformat())
     RUNTIME_STATE["demo_testing_active"] = True
     RUNTIME_STATE["current_mode"] = "DEMO"
     RUNTIME_STATE["is_bot_running"] = True
@@ -245,16 +329,15 @@ async def start_live_trading(user: str = Depends(authenticate_admin)) -> Dict[st
     Starts Live Trading. Strictly locked until demo tests >= 24h and >= 20 clean trades.
     Strictly enforces 2 trades per day cap.
     """
-    now = datetime.now(timezone.utc)
-    demo_duration = now - RUNTIME_STATE["demo_run_start_time"]
-    has_24h = demo_duration >= timedelta(hours=24)
-    has_20_trades = RUNTIME_STATE["clean_demo_trade_count"] >= 20
+    gate = evaluate_demo_gate(
+        RUNTIME_STATE["demo_run_start_time"], RUNTIME_STATE["clean_demo_trade_count"]
+    )
 
-    if not (has_24h and has_20_trades):
+    if not gate.is_unlocked:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Live Trading Locked! Requires >= 24h demo runtime and >= 20 clean trades. "
-                   f"Current: {round(demo_duration.total_seconds() / 3600.0, 1)}h / {RUNTIME_STATE['clean_demo_trade_count']} trades.",
+                   f"Current: {round(gate.elapsed_hours, 1)}h / {gate.clean_trades} trades.",
         )
 
     RUNTIME_STATE["live_trading_active"] = True

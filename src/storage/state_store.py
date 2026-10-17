@@ -78,6 +78,22 @@ class StateStore:
             """)
             await db.commit()
 
+    async def set_state(self, key: str, value: str) -> None:
+        """Insert or update one key in the system_state table."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO system_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+                (key, value),
+            )
+            await db.commit()
+
+    async def get_state(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT value FROM system_state WHERE key = ?", (key,)) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else default
+
     async def log_rejection(self, stage: str, reason: str, symbol: str, details: str = "") -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
