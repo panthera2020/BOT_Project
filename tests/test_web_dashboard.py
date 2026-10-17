@@ -10,6 +10,12 @@ from src.web.app import app, RUNTIME_STATE
 @pytest.mark.asyncio
 async def test_admin_authentication_and_status():
     transport = ASGITransport(app=app)
+    # Reset runtime state to fresh un-qualified baseline
+    RUNTIME_STATE["demo_run_start_time"] = datetime.now(timezone.utc)
+    RUNTIME_STATE["clean_demo_trade_count"] = 0
+    RUNTIME_STATE["is_bot_running"] = True
+    RUNTIME_STATE["kill_switch_triggered"] = False
+    
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Unauthorized attempt
         res = await client.get("/api/status")
@@ -28,6 +34,10 @@ async def test_admin_authentication_and_status():
 async def test_api_key_vault_and_live_gate_rejection():
     transport = ASGITransport(app=app)
     auth = ("admin@tradingbot.local", "P@ssword123!")
+    # Reset qualification state
+    RUNTIME_STATE["demo_run_start_time"] = datetime.now(timezone.utc)
+    RUNTIME_STATE["clean_demo_trade_count"] = 0
+
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Save Demo Keys
         res = await client.post(

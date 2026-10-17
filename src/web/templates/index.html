@@ -18,7 +18,7 @@
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background-color: var(--bg); color: var(--text); padding: 24px; }
-    .container { max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+    .container { max-width: 1250px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
 
     header {
       display: flex; justify-content: space-between; align-items: center;
@@ -26,37 +26,50 @@
       padding: 18px 24px; border-radius: 12px;
     }
     .brand h1 { font-size: 20px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
-    .badge { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; text-transform: uppercase; }
-    .badge-demo { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid #3b82f6; }
-    .badge-live { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; }
+    .badge { font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 999px; text-transform: uppercase; }
+    .badge-demo-active { background: rgba(59, 130, 246, 0.25); color: #60a5fa; border: 1px solid #3b82f6; }
+    .badge-live-active { background: rgba(16, 185, 129, 0.25); color: #34d399; border: 1px solid #10b981; }
+    .badge-idle { background: rgba(156, 163, 175, 0.2); color: #9ca3af; border: 1px solid #4b5563; }
     .badge-stopped { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
 
-    /* Quick Guide / Onboarding banner */
-    .guide-card {
-      background: linear-gradient(135deg, rgba(30, 58, 138, 0.2), rgba(17, 24, 39, 0.8));
-      border: 1px solid #1d4ed8; padding: 18px 24px; border-radius: 12px;
+    /* Action bar */
+    .controls-bar {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
     }
-    .guide-card h2 { font-size: 15px; color: #93c5fd; margin-bottom: 8px; font-weight: 600; }
-    .steps-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 10px; }
-    .step-box { background: rgba(17, 24, 39, 0.6); border: 1px solid var(--card-border); padding: 12px; border-radius: 8px; }
-    .step-box strong { display: block; font-size: 13px; color: #fff; margin-bottom: 4px; }
-    .step-box p { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+    .control-panel {
+      background: var(--card-bg); border: 1px solid var(--card-border);
+      border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .control-header { display: flex; justify-content: space-between; align-items: center; }
+    .control-title { font-size: 15px; font-weight: 700; color: #fff; }
 
     /* Grid Layout */
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 20px; }
     .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; }
-    .card h3 { font-size: 16px; margin-bottom: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .card h3 { font-size: 15px; margin-bottom: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; color: #fff; }
 
-    /* Metrics */
-    .metrics-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .metric-item { background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px; padding: 12px; }
-    .metric-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
-    .metric-value { font-size: 18px; font-weight: 700; color: #fff; }
+    /* Metrics Grid */
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+    .stat-box { background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px; padding: 12px; text-align: center; }
+    .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+    .stat-val { font-size: 18px; font-weight: 700; color: #fff; }
+    .stat-win { color: #34d399; }
+    .stat-loss { color: #f87171; }
 
-    /* Qualification Progress */
+    /* Progress bar */
     .progress-bar-bg { width: 100%; height: 8px; background: #1f2937; border-radius: 999px; overflow: hidden; margin: 8px 0; }
     .progress-bar-fill { height: 100%; background: var(--primary); width: 0%; transition: width 0.3s; }
-    .qual-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+    .qual-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+
+    /* Table */
+    .table-container { overflow-x: auto; margin-top: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+    th { color: var(--text-muted); padding: 8px 12px; border-bottom: 1px solid var(--card-border); font-weight: 600; text-transform: uppercase; }
+    td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.03); color: var(--text); }
+    .tag-buy { color: #34d399; font-weight: 600; }
+    .tag-sell { color: #f87171; font-weight: 600; }
+    .tag-demo { background: rgba(59, 130, 246, 0.15); color: #60a5fa; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+    .tag-live { background: rgba(16, 185, 129, 0.15); color: #34d399; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
 
     /* Forms */
     .form-group { margin-bottom: 12px; }
@@ -73,18 +86,21 @@
       width: 100%; padding: 10px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;
       cursor: pointer; border: none; transition: background 0.2s, opacity 0.2s;
     }
+    .btn-start { background: var(--accent); color: #fff; }
+    .btn-start:hover { background: #059669; }
+    .btn-stop { background: #4b5563; color: #fff; }
+    .btn-stop:hover { background: #374151; }
     .btn-primary { background: var(--primary); color: #fff; }
     .btn-primary:hover { background: #2563eb; }
-    .btn-success { background: var(--accent); color: #fff; }
-    .btn-success:hover { background: #059669; }
     .btn-danger { background: var(--danger); color: #fff; }
     .btn-danger:hover { background: #dc2626; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    /* Toast notification */
+    /* Toast */
     #toast {
-      position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 8px;
+      position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 8px;
       font-size: 13px; font-weight: 500; color: #fff; display: none; z-index: 1000;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
     }
     .toast-success { background: #059669; }
     .toast-error { background: #dc2626; }
@@ -98,63 +114,103 @@
         <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">BTC/USDT Rule-Based Perpetual Engine</p>
       </div>
       <div>
-        <span id="botStatusBadge" class="badge badge-demo">Demo Mode Running</span>
+        <span id="botStatusBadge" class="badge badge-idle">Ready to Run</span>
       </div>
     </header>
 
-    <!-- Simple Instructions Banner -->
-    <div class="guide-card">
-      <h2>🚀 How This Bot Works (3 Simple Steps)</h2>
-      <div class="steps-list">
-        <div class="step-box">
-          <strong>1. Enter Demo Keys</strong>
-          <p>Paste your Bybit Demo API Key & Secret below to let the bot paper-trade risk-free.</p>
+    <!-- Master Execution Controls -->
+    <div class="controls-bar">
+      <!-- Demo Test Control Box -->
+      <div class="control-panel" style="border-left: 4px solid var(--primary);">
+        <div class="control-header">
+          <div class="control-title">🧪 1. Demo Testing Mode (Sandbox)</div>
+          <span style="font-size: 11px; background: rgba(59, 130, 246, 0.2); color: #60a5fa; padding: 3px 8px; border-radius: 4px;">NO Daily Cap</span>
         </div>
-        <div class="step-box">
-          <strong>2. Complete 24h & 20 Trades</strong>
-          <p>The bot autonomously monitors trades. Live trading is physically locked until tested.</p>
+        <p style="font-size: 12px; color: var(--text-muted);">
+          Runs Strategy 1 on Bybit Demo with unlimited daily setups to verify raw performance and win rate.
+        </p>
+        <div style="display: flex; gap: 10px; margin-top: 4px;">
+          <button id="btnStartDemo" class="btn btn-primary" onclick="toggleDemo(true)">▶ Start Demo Testing</button>
+          <button id="btnStopDemo" class="btn btn-stop" style="display:none;" onclick="toggleDemo(false)">⏹ Pause Demo</button>
         </div>
-        <div class="step-box">
-          <strong>3. Switch to Live</strong>
-          <p>Once qualified, the "Enable Live Trading" button unlocks so you can deploy with real funds.</p>
+      </div>
+
+      <!-- Live Trading Control Box -->
+      <div class="control-panel" style="border-left: 4px solid var(--accent);">
+        <div class="control-header">
+          <div class="control-title">🛡️ 2. Live Trading Mode (Mainnet)</div>
+          <span style="font-size: 11px; background: rgba(16, 185, 129, 0.2); color: #34d399; padding: 3px 8px; border-radius: 4px;">Strict 2 Trades / Day</span>
+        </div>
+        <p style="font-size: 12px; color: var(--text-muted);">
+          Real execution strictly enforced by the capital tier schedule and locked until 24h & 20 demo trades qualify.
+        </p>
+        <div style="display: flex; gap: 10px; margin-top: 4px;">
+          <button id="btnStartLive" class="btn btn-start" disabled onclick="toggleLive(true)">🔒 Live Trading (Locked)</button>
+          <button id="btnStopLive" class="btn btn-stop" style="display:none;" onclick="toggleLive(false)">⏹ Pause Live</button>
         </div>
       </div>
     </div>
 
-    <!-- Grid Container -->
-    <div class="grid">
-      <!-- Card 1: Live Status & Metrics -->
-      <div class="card">
-        <h3>System Metrics <span style="font-size: 11px; color: var(--text-muted);">Auto-refreshes every 3s</span></h3>
-        <div class="metrics-row" style="margin-bottom: 12px;">
-          <div class="metric-item">
-            <div class="metric-label">Active Mode</div>
-            <div class="metric-value" id="valMode">DEMO</div>
-          </div>
-          <div class="metric-item">
-            <div class="metric-label">Trading Status</div>
-            <div class="metric-value" id="valStatus" style="color: #34d399;">ACTIVE</div>
+    <!-- Trade Performance Statistics (Demo vs Live) -->
+    <div class="card">
+      <h3>📈 Trade Performance & Win Rate Statistics</h3>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <!-- Demo Stats -->
+        <div>
+          <div style="font-size: 13px; font-weight: 600; color: #60a5fa; margin-bottom: 6px;">DEMO TESTING METRICS (Unlimited Setups)</div>
+          <div class="stats-grid">
+            <div class="stat-box">
+              <div class="stat-label">Win Rate</div>
+              <div class="stat-val stat-win" id="demoWinRate">0.0%</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Total Trades</div>
+              <div class="stat-val" id="demoTrades">0</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Realized PnL</div>
+              <div class="stat-val" id="demoPnlUsd">$0.00</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Total R</div>
+              <div class="stat-val" id="demoPnlR">0.0R</div>
+            </div>
           </div>
         </div>
-        <div class="metrics-row">
-          <div class="metric-item">
-            <div class="metric-label">Clean Demo Trades</div>
-            <div class="metric-value" id="valTrades">0 / 20</div>
-          </div>
-          <div class="metric-item">
-            <div class="metric-label">Runtime Elapsed</div>
-            <div class="metric-value" id="valHours">0.0h / 24h</div>
+
+        <!-- Live Stats -->
+        <div>
+          <div style="font-size: 13px; font-weight: 600; color: #34d399; margin-bottom: 6px;">LIVE TRADING METRICS (Max 2/Day)</div>
+          <div class="stats-grid">
+            <div class="stat-box">
+              <div class="stat-label">Win Rate</div>
+              <div class="stat-val stat-win" id="liveWinRate">0.0%</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Total Trades</div>
+              <div class="stat-val" id="liveTrades">0</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Realized PnL</div>
+              <div class="stat-val" id="livePnlUsd">$0.00</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Total R</div>
+              <div class="stat-val" id="livePnlR">0.0R</div>
+            </div>
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- Card 2: Demo Qualification Gate -->
+    <!-- Qualification Gate & Key Vaults -->
+    <div class="grid">
+      <!-- Demo Qualification Gate -->
       <div class="card">
-        <h3>Demo Qualification Gate</h3>
+        <h3>Qualification Lock Progress</h3>
         <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
-          To protect capital, live trading is locked until Strategy 1 proves stability in Bybit Demo.
+          Requirements before Live Trading can be activated:
         </p>
-
         <div class="qual-row">
           <span>Runtime Progress (Min 24h)</span>
           <span id="textHoursProgress">0 / 24 hrs</span>
@@ -170,18 +226,11 @@
         <div class="progress-bar-bg">
           <div id="barTrades" class="progress-bar-fill"></div>
         </div>
-
-        <button id="btnEnableLive" class="btn btn-success" style="margin-top: 16px;" disabled onclick="activateLiveMode()">
-          🔒 Enable Live Trading (Locked)
-        </button>
       </div>
 
-      <!-- Card 3: Bybit Demo API Keys -->
+      <!-- Demo Key Vault -->
       <div class="card">
         <h3>Bybit Demo API Key Vault</h3>
-        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
-          Create a key on Bybit Demo with <strong>Contract Orders & Position</strong> permissions.
-        </p>
         <div class="form-group">
           <label>Demo API Key</label>
           <input type="text" id="demoApiKey" placeholder="Enter Bybit Demo Key">
@@ -193,12 +242,9 @@
         <button class="btn btn-primary" onclick="saveKeys('demo')">Save Demo Keys</button>
       </div>
 
-      <!-- Card 4: Bybit Live API Keys -->
+      <!-- Live Key Vault -->
       <div class="card">
         <h3>Bybit Live API Key Vault</h3>
-        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
-          Used strictly once demo testing completes. API keys remain trade-only.
-        </p>
         <div class="form-group">
           <label>Live API Key</label>
           <input type="text" id="liveApiKey" placeholder="Enter Bybit Live Key">
@@ -209,17 +255,46 @@
         </div>
         <button class="btn btn-primary" onclick="saveKeys('live')">Save Live Keys</button>
       </div>
+    </div>
 
-      <!-- Card 5: Emergency Controls -->
-      <div class="card" style="grid-column: 1 / -1; border-color: rgba(239, 68, 68, 0.4);">
-        <h3 style="color: #f87171;">⚠️ Emergency Stop & Kill Switch</h3>
-        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
-          Instantly cancels all pending orders, closes open positions at market, and disarms the engine.
-        </p>
-        <button class="btn btn-danger" style="max-width: 250px;" onclick="triggerKillSwitch()">
-          ENGAGE EMERGENCY KILL SWITCH
-        </button>
+    <!-- Recent Trades Table -->
+    <div class="card">
+      <h3>📜 Recent Trade History</h3>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Mode</th>
+              <th>Side</th>
+              <th>Qty</th>
+              <th>Entry Price</th>
+              <th>Exit Price</th>
+              <th>PnL (USDT)</th>
+              <th>PnL (R)</th>
+              <th>Timestamp (UTC)</th>
+            </tr>
+          </thead>
+          <tbody id="tradeHistoryBody">
+            <tr>
+              <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 16px;">
+                No trades recorded yet. Start Demo Testing above to begin taking setups.
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
+    </div>
+
+    <!-- Emergency Kill Switch -->
+    <div class="card" style="border-color: rgba(239, 68, 68, 0.4);">
+      <h3 style="color: #f87171;">⚠️ Emergency Stop & Kill Switch</h3>
+      <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+        Immediately flattens any open position, cancels pending stop orders, and shuts down both Demo and Live testing loops.
+      </p>
+      <button class="btn btn-danger" style="max-width: 250px;" onclick="triggerKillSwitch()">
+        ENGAGE EMERGENCY KILL SWITCH
+      </button>
     </div>
   </div>
 
@@ -240,29 +315,45 @@
         if (!res.ok) return;
         const data = await res.json();
 
-        // Update metrics
-        document.getElementById("valMode").innerText = data.current_mode;
-        document.getElementById("valStatus").innerText = data.status;
-        document.getElementById("valStatus").style.color = data.status === "RUNNING" ? "#34d399" : "#f87171";
-
-        // Update badge
+        // Update Header Badge
         const badge = document.getElementById("botStatusBadge");
-        if (data.status !== "RUNNING") {
+        if (data.kill_switch_active || data.status === "STOPPED") {
           badge.className = "badge badge-stopped";
-          badge.innerText = "System Stopped";
-        } else if (data.current_mode === "LIVE") {
-          badge.className = "badge badge-live";
-          badge.innerText = "LIVE Trading Active";
+          badge.innerText = "System Halted";
+        } else if (data.live_trading_active) {
+          badge.className = "badge badge-live-active";
+          badge.innerText = "LIVE Trading Active (Max 2/Day)";
+        } else if (data.demo_testing_active) {
+          badge.className = "badge badge-demo-active";
+          badge.innerText = "Demo Testing Running (No Cap)";
         } else {
-          badge.className = "badge badge-demo";
-          badge.innerText = "Demo Testing Mode";
+          badge.className = "badge badge-idle";
+          badge.innerText = "Idle / Ready";
         }
 
-        const q = data.demo_qualification;
-        document.getElementById("valTrades").innerText = `${q.clean_trades} / 20`;
-        document.getElementById("valHours").innerText = `${q.elapsed_hours}h / 24h`;
+        // Toggle start/stop button states
+        document.getElementById("btnStartDemo").style.display = data.demo_testing_active ? "none" : "block";
+        document.getElementById("btnStopDemo").style.display = data.demo_testing_active ? "block" : "none";
 
-        // Progress bars
+        document.getElementById("btnStartLive").style.display = data.live_trading_active ? "none" : "block";
+        document.getElementById("btnStopLive").style.display = data.live_trading_active ? "block" : "none";
+
+        // Update Demo Stats
+        const ds = data.stats.demo;
+        document.getElementById("demoWinRate").innerText = ds.win_rate + "%";
+        document.getElementById("demoTrades").innerText = `${ds.wins}W / ${ds.losses}L (${ds.total_trades})`;
+        document.getElementById("demoPnlUsd").innerText = (ds.total_pnl_usd >= 0 ? "+$" : "-$") + Math.abs(ds.total_pnl_usd);
+        document.getElementById("demoPnlR").innerText = (ds.total_pnl_r >= 0 ? "+" : "") + ds.total_pnl_r + "R";
+
+        // Update Live Stats
+        const ls = data.stats.live;
+        document.getElementById("liveWinRate").innerText = ls.win_rate + "%";
+        document.getElementById("liveTrades").innerText = `${ls.wins}W / ${ls.losses}L (${ls.total_trades})`;
+        document.getElementById("livePnlUsd").innerText = (ls.total_pnl_usd >= 0 ? "+$" : "-$") + Math.abs(ls.total_pnl_usd);
+        document.getElementById("livePnlR").innerText = (ls.total_pnl_r >= 0 ? "+" : "") + ls.total_pnl_r + "R";
+
+        // Qualification Progress
+        const q = data.demo_qualification;
         const pctHours = Math.min(100, (q.elapsed_hours / 24.0) * 100);
         const pctTrades = Math.min(100, (q.clean_trades / 20.0) * 100);
         document.getElementById("barHours").style.width = pctHours + "%";
@@ -270,17 +361,66 @@
         document.getElementById("textHoursProgress").innerText = `${q.elapsed_hours} / 24 hrs`;
         document.getElementById("textTradesProgress").innerText = `${q.clean_trades} / 20 trades`;
 
-        // Live button state
-        const btnLive = document.getElementById("btnEnableLive");
+        const btnLive = document.getElementById("btnStartLive");
         if (q.is_live_unlocked) {
           btnLive.disabled = false;
-          btnLive.innerText = "🚀 Unlock Live Trading Now";
+          btnLive.innerText = "🚀 Start Live Trading (Unlocked)";
         } else {
           btnLive.disabled = true;
-          btnLive.innerText = "🔒 Enable Live Trading (Locked)";
+          btnLive.innerText = "🔒 Live Trading (Locked)";
+        }
+
+        // Render Recent Trades
+        if (data.recent_trades && data.recent_trades.length > 0) {
+          const tbody = document.getElementById("tradeHistoryBody");
+          tbody.innerHTML = data.recent_trades.map(t => `
+            <tr>
+              <td>#${t.id}</td>
+              <td><span class="${t.mode === 'LIVE' ? 'tag-live' : 'tag-demo'}">${t.mode}</span></td>
+              <td class="${t.side === 'Buy' ? 'tag-buy' : 'tag-sell'}">${t.side}</td>
+              <td>${t.qty}</td>
+              <td>$${t.entry_price.toLocaleString()}</td>
+              <td>$${t.exit_price.toLocaleString()}</td>
+              <td class="${t.pnl_usd >= 0 ? 'tag-buy' : 'tag-sell'}">${t.pnl_usd >= 0 ? '+' : ''}$${t.pnl_usd}</td>
+              <td class="${t.pnl_r >= 0 ? 'tag-buy' : 'tag-sell'}">${t.pnl_r >= 0 ? '+' : ''}${t.pnl_r}R</td>
+              <td style="color: var(--text-muted);">${t.timestamp}</td>
+            </tr>
+          `).join("");
         }
       } catch (err) {
         console.error("Failed to fetch status:", err);
+      }
+    }
+
+    async function toggleDemo(start) {
+      const endpoint = start ? "/api/demo/start" : "/api/demo/stop";
+      try {
+        const res = await fetch(endpoint, { method: "POST" });
+        const d = await res.json();
+        if (res.ok) {
+          showToast(d.message);
+          fetchStatus();
+        } else {
+          showToast(d.detail || "Error toggling demo testing", true);
+        }
+      } catch (err) {
+        showToast("Network error", true);
+      }
+    }
+
+    async function toggleLive(start) {
+      const endpoint = start ? "/api/live/start" : "/api/live/stop";
+      try {
+        const res = await fetch(endpoint, { method: "POST" });
+        const d = await res.json();
+        if (res.ok) {
+          showToast(d.message);
+          fetchStatus();
+        } else {
+          showToast(d.detail || "Error toggling live trading", true);
+        }
+      } catch (err) {
+        showToast("Network error", true);
       }
     }
 
@@ -308,21 +448,6 @@
       }
     }
 
-    async function activateLiveMode() {
-      try {
-        const res = await fetch("/api/live/enable", { method: "POST" });
-        const d = await res.json();
-        if (res.ok) {
-          showToast("Live Trading Activated successfully!");
-          fetchStatus();
-        } else {
-          showToast(d.detail || "Failed to activate live trading", true);
-        }
-      } catch (err) {
-        showToast("Network error activating live trading", true);
-      }
-    }
-
     async function triggerKillSwitch() {
       if (!confirm("Are you sure you want to engage the EMERGENCY KILL SWITCH? This will stop all trading.")) return;
       try {
@@ -335,9 +460,8 @@
       }
     }
 
-    // Poll status periodically
     fetchStatus();
-    setInterval(fetchStatus, 3000);
+    setInterval(fetchStatus, 2500);
   </script>
 </body>
 </html>
