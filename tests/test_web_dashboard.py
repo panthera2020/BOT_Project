@@ -79,3 +79,24 @@ async def test_emergency_kill_switch():
         assert res.json()["status"] == "HALTED"
         assert not RUNTIME_STATE["is_bot_running"]
         assert RUNTIME_STATE["kill_switch_triggered"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_config_and_test_ping():
+    transport = ASGITransport(app=app)
+    auth = ("admin@tradingbot.local", "P@ssword123!")
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Save credentials
+        res = await client.post(
+            "/api/telegram",
+            auth=auth,
+            json={"bot_token": "mock_bot_token_123", "chat_id": "999888777"},
+        )
+        assert res.status_code == 200
+        assert RUNTIME_STATE["telegram_config"]["bot_token"] == "mock_bot_token_123"
+        assert RUNTIME_STATE["telegram_config"]["chat_id"] == "999888777"
+
+        # Trigger test ping
+        res_test = await client.post("/api/telegram/test", auth=auth)
+        assert res_test.status_code == 200
+        assert "Test ping sent" in res_test.json()["message"]

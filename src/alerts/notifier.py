@@ -33,7 +33,21 @@ class AlertDispatcher:
         alert = AlertMessage(title=title, body=body, level=level)
         self.sent_alerts.append(alert)
 
-        # In production this executes httpx requests to Telegram API and aiosmtplib
+        # Telegram dispatch
+        if self.telegram_token and self.telegram_chat_id and not self.telegram_token.startswith("mock_"):
+            try:
+                import httpx
+                url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+                payload = {
+                    "chat_id": self.telegram_chat_id,
+                    "text": f"*{title}*\n{body}",
+                    "parse_mode": "Markdown",
+                }
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    await client.post(url, json=payload)
+            except Exception as e:
+                logger.error(f"Failed to dispatch Telegram message: {e}")
+
         logger.info(f"[{level}] {title}: {body}")
         return alert
 

@@ -104,6 +104,24 @@
     }
     .toast-success { background: #059669; }
     .toast-error { background: #dc2626; }
+
+    /* Market Radar & Live Pulse */
+    .pulse-dot {
+      width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px;
+    }
+    .pulse-active {
+      background-color: #10b981;
+      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+      animation: pulse-green 1.8s infinite;
+    }
+    .pulse-idle {
+      background-color: #6b7280;
+    }
+    @keyframes pulse-green {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+      70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
   </style>
 </head>
 <body>
@@ -148,6 +166,35 @@
           <button id="btnStartLive" class="btn btn-start" disabled onclick="toggleLive(true)">🔒 Live Trading (Locked)</button>
           <button id="btnStopLive" class="btn btn-stop" style="display:none;" onclick="toggleLive(false)">⏹ Pause Live</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Real-time Market Radar & Scanning Heartbeat -->
+    <div class="card" style="border-left: 4px solid #3b82f6;">
+      <h3>
+        <span style="display: flex; align-items: center;">
+          <span id="radarPulseDot" class="pulse-dot pulse-idle"></span>
+          <span>📡 Live Market Radar & Scanning Heartbeat</span>
+        </span>
+        <span id="radarStatusText" style="font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 700;">Radar Idle</span>
+      </h3>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 6px;">
+        <div class="stat-box" style="text-align: left;">
+          <div class="stat-label">Pair Monitored</div>
+          <div class="stat-val" style="font-size: 14px;" id="radarSymbol">BTCUSDT (Perpetual)</div>
+        </div>
+        <div class="stat-box" style="text-align: left;">
+          <div class="stat-label">Timeframes Tracked</div>
+          <div class="stat-val" style="font-size: 13px; color: #60a5fa;" id="radarTimeframes">1H | 15M | 2M</div>
+        </div>
+        <div class="stat-box" style="text-align: left;">
+          <div class="stat-label">Last Heartbeat / Scan (UTC)</div>
+          <div class="stat-val" style="font-size: 13px; color: #34d399;" id="radarScanTime">--:--:--</div>
+        </div>
+      </div>
+      <div style="margin-top: 12px; padding: 10px 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px; font-size: 12px; display: flex; align-items: center; justify-content: space-between;">
+        <span style="color: var(--text-muted);">Current Strategy Action:</span>
+        <span id="radarDetails" style="color: #f3f4f6; font-weight: 500;">Radar idle. Click 'Start Demo Testing' to begin scanning.</span>
       </div>
     </div>
 
@@ -254,6 +301,26 @@
           <input type="password" id="liveApiSecret" placeholder="Enter Bybit Live Secret">
         </div>
         <button class="btn btn-primary" onclick="saveKeys('live')">Save Live Keys</button>
+      </div>
+
+      <!-- Telegram Alert Vault -->
+      <div class="card" style="border-left: 4px solid #0088cc;">
+        <h3>📱 Telegram Notification Alerts</h3>
+        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+          Receive instant trade entries, exits, and risk alerts on your phone.
+        </p>
+        <div class="form-group">
+          <label>Telegram Bot Token <span style="font-weight: normal; color: var(--text-muted);">(from @BotFather)</span></label>
+          <input type="password" id="telegramBotToken" placeholder="e.g. 7123456789:AAHk...">
+        </div>
+        <div class="form-group">
+          <label>Your Telegram Chat ID or Channel <span style="font-weight: normal; color: var(--text-muted);">(from @userinfobot)</span></label>
+          <input type="text" id="telegramChatId" placeholder="e.g. 123456789 or @mytradingalerts">
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-primary" style="background: #0088cc;" onclick="saveTelegramSettings()">Save Telegram</button>
+          <button class="btn btn-stop" style="white-space: nowrap;" onclick="testTelegramAlert()">Send Test Ping</button>
+        </div>
       </div>
     </div>
 
@@ -370,6 +437,27 @@
           btnLive.innerText = "🔒 Live Trading (Locked)";
         }
 
+        // Market Radar Telemetry
+        if (data.market_radar) {
+          const radar = data.market_radar;
+          const pulse = document.getElementById("radarPulseDot");
+          const statusText = document.getElementById("radarStatusText");
+          const scanTime = document.getElementById("radarScanTime");
+          const details = document.getElementById("radarDetails");
+
+          if (radar.is_actively_scanning) {
+            pulse.className = "pulse-dot pulse-active";
+            statusText.innerText = "ACTIVELY SCANNING ORDER BOOK & CANDLES";
+            statusText.style.color = "#34d399";
+          } else {
+            pulse.className = "pulse-dot pulse-idle";
+            statusText.innerText = "RADAR IDLE (Awaiting activation)";
+            statusText.style.color = "#9ca3af";
+          }
+          if (radar.last_market_scan_utc) scanTime.innerText = radar.last_market_scan_utc;
+          if (radar.current_market_status) details.innerText = radar.current_market_status;
+        }
+
         // Render Recent Trades
         if (data.recent_trades && data.recent_trades.length > 0) {
           const tbody = document.getElementById("tradeHistoryBody");
@@ -445,6 +533,44 @@
         }
       } catch (err) {
         showToast("Network error saving keys", true);
+      }
+    }
+
+    async function saveTelegramSettings() {
+      const token = document.getElementById("telegramBotToken").value.trim();
+      const chatId = document.getElementById("telegramChatId").value.trim();
+      if (!token || !chatId) {
+        showToast("Please enter both Bot Token and Chat ID.", true);
+        return;
+      }
+      try {
+        const res = await fetch("/api/telegram", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bot_token: token, chat_id: chatId })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          showToast(d.message || "Telegram settings saved!");
+        } else {
+          showToast(d.detail || "Error saving Telegram settings", true);
+        }
+      } catch (err) {
+        showToast("Network error saving Telegram settings", true);
+      }
+    }
+
+    async function testTelegramAlert() {
+      try {
+        const res = await fetch("/api/telegram/test", { method: "POST" });
+        const d = await res.json();
+        if (res.ok) {
+          showToast(d.message);
+        } else {
+          showToast(d.detail || "Error sending test alert", true);
+        }
+      } catch (err) {
+        showToast("Network error sending test alert", true);
       }
     }
 

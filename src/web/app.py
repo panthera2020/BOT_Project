@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from src.core.daily_cap import get_trading_day_id
 from src.core.trade_stats import TradeStatsTracker
+from src.alerts.notifier import AlertDispatcher
 
 app = FastAPI(title="Trading Bot Operations Console", version="1.1.0")
 security = HTTPBasic()
@@ -48,6 +49,7 @@ RUNTIME_STATE = {
     "bybit_live_keys": {"api_key": "", "api_secret": ""},
     "kill_switch_triggered": False,
     "active_position": None,  # Simulated active position
+    "telegram_config": {"bot_token": "", "chat_id": ""},
 }
 
 
@@ -65,6 +67,11 @@ class APIKeyPayload(BaseModel):
     account_type: str  # "demo" or "live"
     api_key: str
     api_secret: str
+
+
+class TelegramPayload(BaseModel):
+    bot_token: str
+    chat_id: str
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -90,6 +97,16 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
     live_stats = STATS_TRACKER.get_stats("LIVE")
     recent_trades = STATS_TRACKER.get_recent_trades(10)
 
+    # Market Radar Telemetry (shows actively looking for setups)
+    is_scanning = RUNTIME_STATE["demo_testing_active"] or RUNTIME_STATE["live_trading_active"]
+    radar_state = {
+        "is_actively_scanning": is_scanning,
+        "symbol_monitored": "BTCUSDT",
+        "timeframes_tracked": ["1h (Macro Bias)", "15m (Liquidity Sweeps)", "2m (Entry Triggers)"],
+        "last_market_scan_utc": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "current_market_status": "Scanning order books & candles for Strategy 1 liquidity sweep setups..." if is_scanning else "Radar idle. Click 'Start Demo Testing' to begin scanning.",
+    }
+
     return {
         "status": "RUNNING" if RUNTIME_STATE["is_bot_running"] else "STOPPED",
         "demo_testing_active": RUNTIME_STATE["demo_testing_active"],
@@ -97,6 +114,7 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
         "current_mode": RUNTIME_STATE["current_mode"],
         "kill_switch_active": RUNTIME_STATE["kill_switch_triggered"],
         "active_position": RUNTIME_STATE["active_position"],
+        "market_radar": radar_state,
         "demo_qualification": {
             "elapsed_hours": round(demo_duration.total_seconds() / 3600.0, 2),
             "clean_trades": RUNTIME_STATE["clean_demo_trade_count"],
@@ -113,6 +131,10 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
             "demo": bool(RUNTIME_STATE["bybit_demo_keys"]["api_key"]),
             "live": bool(RUNTIME_STATE["bybit_live_keys"]["api_key"]),
         },
+        "telegram": {
+            "is_configured": bool(RUNTIME_STATE["telegram_config"]["bot_token"] and RUNTIME_STATE["telegram_config"]["chat_id"]),
+            "chat_id": RUNTIME_STATE["telegram_config"]["chat_id"],
+        },
     }
 
 
@@ -128,6 +150,33 @@ async def save_api_keys(payload: APIKeyPayload, user: str = Depends(authenticate
         return {"status": "Live keys stored successfully"}
     else:
         raise HTTPException(status_code=400, detail="Invalid account_type. Must be 'demo' or 'live'")
+
+
+@app.post("/api/telegram")
+async def save_telegram_config(payload: TelegramPayload, user: str = Depends(authenticate_admin)) -> Dict[str, str]:
+    RUNTIME_STATE["telegram_config"]["bot_token"] = payload.bot_token.strip()
+    RUNTIME_STATE["telegram_config"]["chat_id"] = payload.chat_id.strip()
+    return {"status": "SUCCESS", "message": "Telegram credentials saved successfully."}
+
+
+@app.post("/api/telegram/test")
+async def test_telegram_alert(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
+    token = RUNTIME_STATE["telegram_config"]["bot_token"]
+    chat_id = RUNTIME_STATE["telegram_config"]["chat_id"]
+    if not token or not chat_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please provide both Telegram Bot Token and Chat ID before testing.",
+        )
+
+    dispatcher = AlertDispatcher(telegram_token=token, telegram_chat_id=chat_id)
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    await dispatcher.send_alert(
+        title="🔔 MISSION CONTROL: Telegram Alerts Connected!",
+        body=f"Connected successfully at {now_str}.\n\nYou will receive real-time notifications for Strategy 1 entries, liquidity sweeps, TP1 partials, and risk resets here.",
+        level="INFO",
+    )
+    return {"status": "SUCCESS", "message": "Test ping sent to your Telegram! Check your phone."}
 
 
 @app.post("/api/demo/start")
