@@ -367,7 +367,98 @@
 
   <div id="toast"></div>
 
+  <!-- Admin sign-in form. Used instead of the browser's native Basic Auth popup,
+       which reverse proxies on free hosts often suppress. -->
+  <div id="loginOverlay" style="display:none; position:fixed; inset:0; background:rgba(8,12,24,0.96); z-index:1000; align-items:center; justify-content:center;">
+    <form id="loginForm" class="card" style="width:min(380px, 92vw);" onsubmit="return submitLogin(event)">
+      <h3>Admin Sign In</h3>
+      <div class="form-group">
+        <label for="loginUser">Username</label>
+        <input type="text" id="loginUser" autocomplete="username" placeholder="Admin username" required>
+      </div>
+      <div class="form-group">
+        <label for="loginPass">Password</label>
+        <input type="password" id="loginPass" autocomplete="current-password" placeholder="Admin password" required>
+      </div>
+      <div id="loginError" style="color:#f87171; font-size:12px; min-height:16px; margin-bottom:8px;"></div>
+      <button id="loginBtn" type="submit" class="btn btn-primary">Sign In</button>
+    </form>
+  </div>
+
   <script>
+    // --- Admin session: credentials are checked by POST /api/login, then sent as a
+    // Basic Authorization header on every request. Kept in sessionStorage only, so
+    // closing the tab signs you out. ---
+    const AUTH_KEY = "tb_auth";
+
+    function getAuth() {
+      try { return sessionStorage.getItem(AUTH_KEY) || ""; } catch (e) { return ""; }
+    }
+    function setAuth(token) {
+      try { sessionStorage.setItem(AUTH_KEY, token); } catch (e) {}
+    }
+    function clearAuth() {
+      try { sessionStorage.removeItem(AUTH_KEY); } catch (e) {}
+    }
+    function showLogin(msg) {
+      const overlay = document.getElementById("loginOverlay");
+      const wasHidden = overlay.style.display === "none";
+      overlay.style.display = "flex";
+      if (msg !== undefined) document.getElementById("loginError").innerText = msg;
+      if (wasHidden) setTimeout(() => document.getElementById("loginUser").focus(), 0);
+    }
+    function hideLogin() {
+      document.getElementById("loginOverlay").style.display = "none";
+    }
+
+    async function authFetch(url, options = {}) {
+      const headers = Object.assign({}, options.headers || {});
+      const token = getAuth();
+      if (token) headers["Authorization"] = "Basic " + token;
+      const res = await fetch(url, Object.assign({}, options, { headers }));
+      if (res.status === 401) {
+        clearAuth();
+        showLogin(token ? "Session expired. Please sign in again." : undefined);
+      }
+      return res;
+    }
+
+    async function submitLogin(ev) {
+      ev.preventDefault();
+      const user = document.getElementById("loginUser").value.trim();
+      const pass = document.getElementById("loginPass").value;
+      const btn = document.getElementById("loginBtn");
+      let token;
+      try {
+        token = btoa(user + ":" + pass);
+      } catch (e) {
+        showLogin("Username and password must use plain ASCII characters.");
+        return false;
+      }
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user, password: pass })
+        });
+        if (res.ok) {
+          setAuth(token);
+          document.getElementById("loginPass").value = "";
+          showLogin("");
+          hideLogin();
+          fetchStatus();
+        } else {
+          showLogin("Wrong username or password.");
+        }
+      } catch (err) {
+        showLogin("Could not reach the server. Try again.");
+      } finally {
+        btn.disabled = false;
+      }
+      return false;
+    }
+
     function showToast(msg, isError = false) {
       const t = document.getElementById("toast");
       t.innerText = msg;
@@ -377,8 +468,9 @@
     }
 
     async function fetchStatus() {
+      if (!getAuth()) { showLogin(); return; }
       try {
-        const res = await fetch("/api/status");
+        const res = await authFetch("/api/status");
         if (!res.ok) return;
         const data = await res.json();
 
@@ -483,7 +575,7 @@
     async function toggleDemo(start) {
       const endpoint = start ? "/api/demo/start" : "/api/demo/stop";
       try {
-        const res = await fetch(endpoint, { method: "POST" });
+        const res = await authFetch(endpoint, { method: "POST" });
         const d = await res.json();
         if (res.ok) {
           showToast(d.message);
@@ -499,7 +591,7 @@
     async function toggleLive(start) {
       const endpoint = start ? "/api/live/start" : "/api/live/stop";
       try {
-        const res = await fetch(endpoint, { method: "POST" });
+        const res = await authFetch(endpoint, { method: "POST" });
         const d = await res.json();
         if (res.ok) {
           showToast(d.message);
@@ -520,7 +612,7 @@
         return;
       }
       try {
-        const res = await fetch("/api/keys", {
+        const res = await authFetch("/api/keys", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ account_type: accountType, api_key: apiKey, api_secret: apiSecret })
@@ -544,7 +636,7 @@
         return;
       }
       try {
-        const res = await fetch("/api/telegram", {
+        const res = await authFetch("/api/telegram", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ bot_token: token, chat_id: chatId })
@@ -562,7 +654,7 @@
 
     async function testTelegramAlert() {
       try {
-        const res = await fetch("/api/telegram/test", { method: "POST" });
+        const res = await authFetch("/api/telegram/test", { method: "POST" });
         const d = await res.json();
         if (res.ok) {
           showToast(d.message);
@@ -577,7 +669,7 @@
     async function triggerKillSwitch() {
       if (!confirm("Are you sure you want to engage the EMERGENCY KILL SWITCH? This will stop all trading.")) return;
       try {
-        const res = await fetch("/api/emergency/kill", { method: "POST" });
+        const res = await authFetch("/api/emergency/kill", { method: "POST" });
         const d = await res.json();
         showToast(d.message || "Kill switch engaged", true);
         fetchStatus();

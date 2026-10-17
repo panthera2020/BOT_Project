@@ -100,3 +100,56 @@ async def test_telegram_config_and_test_ping():
         res_test = await client.post("/api/telegram/test", auth=auth)
         assert res_test.status_code == 200
         assert "Test ping sent" in res_test.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_login_endpoint_accepts_valid_and_rejects_invalid_credentials():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        ok = await client.post(
+            "/api/login",
+            json={"username": "admin@tradingbot.local", "password": "P@ssword123!"},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["status"] == "OK"
+
+        bad_password = await client.post(
+            "/api/login",
+            json={"username": "admin@tradingbot.local", "password": "wrong"},
+        )
+        assert bad_password.status_code == 401
+
+        bad_user = await client.post(
+            "/api/login",
+            json={"username": "someone@else.local", "password": "P@ssword123!"},
+        )
+        assert bad_user.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_responses_never_trigger_browser_login_popup():
+    """A WWW-Authenticate challenge makes browsers show a native popup that cloud
+    proxies often suppress; the page uses its own sign-in form instead."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/api/status")
+        assert res.status_code == 401
+        assert "www-authenticate" not in res.headers
+
+        bad = await client.post(
+            "/api/login",
+            json={"username": "admin@tradingbot.local", "password": "wrong"},
+        )
+        assert bad.status_code == 401
+        assert "www-authenticate" not in bad.headers
+
+
+@pytest.mark.asyncio
+async def test_dashboard_page_contains_sign_in_form():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/")
+        assert res.status_code == 200
+        assert 'id="loginOverlay"' in res.text
+        assert "authFetch" in res.text
+        assert "/api/login" in res.text

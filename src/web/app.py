@@ -4,6 +4,8 @@ trade stats for Demo and Live, and autonomous testing engine.
 """
 import os
 import asyncio
+import logging
+import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -16,10 +18,22 @@ from src.core.trade_stats import TradeStatsTracker
 from src.alerts.notifier import AlertDispatcher
 
 app = FastAPI(title="Trading Bot Operations Console", version="1.1.0")
-security = HTTPBasic()
+# auto_error=False so a missing Authorization header returns our own 401 without a
+# WWW-Authenticate challenge. That challenge triggers the browser's native login
+# popup, which reverse proxies on free hosts often suppress; the page signs in
+# through its own form instead.
+security = HTTPBasic(auto_error=False)
 
-ADMIN_USER = "admin@tradingbot.local"
-ADMIN_PASS = "P@ssword123!"
+DEFAULT_ADMIN_USER = "admin@tradingbot.local"
+DEFAULT_ADMIN_PASS = "P@ssword123!"
+# Set ADMIN_USER and ADMIN_PASS as environment variables on the host. The defaults
+# live in a public repository and must not be used on a real deployment.
+ADMIN_USER = os.environ.get("ADMIN_USER", DEFAULT_ADMIN_USER)
+ADMIN_PASS = os.environ.get("ADMIN_PASS", DEFAULT_ADMIN_PASS)
+
+logger = logging.getLogger("WebConsole")
+if ADMIN_PASS == DEFAULT_ADMIN_PASS:
+    logger.warning("ADMIN_PASS is the public default; set ADMIN_USER and ADMIN_PASS environment variables.")
 
 # Global trade tracker instance
 STATS_TRACKER = TradeStatsTracker()
@@ -53,14 +67,24 @@ RUNTIME_STATE = {
 }
 
 
-def authenticate_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
-    if credentials.username != ADMIN_USER or credentials.password != ADMIN_PASS:
+def _credentials_valid(username: str, password: str) -> bool:
+    user_ok = secrets.compare_digest(username.encode("utf-8"), ADMIN_USER.encode("utf-8"))
+    pass_ok = secrets.compare_digest(password.encode("utf-8"), ADMIN_PASS.encode("utf-8"))
+    return user_ok and pass_ok
+
+
+def authenticate_admin(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
+    if credentials is None or not _credentials_valid(credentials.username, credentials.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid administrative credentials",
-            headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
 
 
 class APIKeyPayload(BaseModel):
@@ -77,6 +101,18 @@ class TelegramPayload(BaseModel):
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.post("/api/login")
+async def login(payload: LoginPayload) -> Dict[str, str]:
+    """Checks admin credentials for the sign-in form. The page then sends them as a
+    Basic Authorization header on every later request."""
+    if not _credentials_valid(payload.username, payload.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid administrative credentials",
+        )
+    return {"status": "OK", "message": "Signed in."}
 
 
 @app.get("/", response_class=HTMLResponse)
