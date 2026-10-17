@@ -9,6 +9,10 @@ from datetime import datetime, timezone, timedelta
 from src.core.daily_cap import get_trading_day_id
 
 
+import os
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
 app = FastAPI(title="Trading Bot Operations Console", version="1.0.0")
 security = HTTPBasic()
 
@@ -37,6 +41,15 @@ def authenticate_admin(credentials: HTTPBasicCredentials = Depends(security)) ->
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_dashboard():
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
+    if os.path.exists(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Trading Bot Dashboard Template Missing</h1>", status_code=500)
 
 
 class APIKeyPayload(BaseModel):

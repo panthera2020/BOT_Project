@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Bot Mission Control</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #111827;
+      --card-border: #1f2937;
+      --primary: #3b82f6;
+      --accent: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); padding: 24px; }
+    .container { max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      background: var(--card-bg); border: 1px solid var(--card-border);
+      padding: 18px 24px; border-radius: 12px;
+    }
+    .brand h1 { font-size: 20px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
+    .badge { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; text-transform: uppercase; }
+    .badge-demo { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid #3b82f6; }
+    .badge-live { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; }
+    .badge-stopped { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
+
+    /* Quick Guide / Onboarding banner */
+    .guide-card {
+      background: linear-gradient(135deg, rgba(30, 58, 138, 0.2), rgba(17, 24, 39, 0.8));
+      border: 1px solid #1d4ed8; padding: 18px 24px; border-radius: 12px;
+    }
+    .guide-card h2 { font-size: 15px; color: #93c5fd; margin-bottom: 8px; font-weight: 600; }
+    .steps-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 10px; }
+    .step-box { background: rgba(17, 24, 39, 0.6); border: 1px solid var(--card-border); padding: 12px; border-radius: 8px; }
+    .step-box strong { display: block; font-size: 13px; color: #fff; margin-bottom: 4px; }
+    .step-box p { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+
+    /* Grid Layout */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; }
+    .card h3 { font-size: 16px; margin-bottom: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+
+    /* Metrics */
+    .metrics-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .metric-item { background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px; padding: 12px; }
+    .metric-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+    .metric-value { font-size: 18px; font-weight: 700; color: #fff; }
+
+    /* Qualification Progress */
+    .progress-bar-bg { width: 100%; height: 8px; background: #1f2937; border-radius: 999px; overflow: hidden; margin: 8px 0; }
+    .progress-bar-fill { height: 100%; background: var(--primary); width: 0%; transition: width 0.3s; }
+    .qual-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+
+    /* Forms */
+    .form-group { margin-bottom: 12px; }
+    label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; font-weight: 500; }
+    input[type="text"], input[type="password"] {
+      width: 100%; padding: 10px 12px; background: #0b0f19; border: 1px solid var(--card-border);
+      border-radius: 6px; color: #fff; font-size: 13px; outline: none; transition: border-color 0.2s;
+    }
+    input[type="text"]:focus, input[type="password"]:focus { border-color: var(--primary); }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 100%; padding: 10px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;
+      cursor: pointer; border: none; transition: background 0.2s, opacity 0.2s;
+    }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-success { background: var(--accent); color: #fff; }
+    .btn-success:hover { background: #059669; }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { background: #dc2626; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Toast notification */
+    #toast {
+      position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 8px;
+      font-size: 13px; font-weight: 500; color: #fff; display: none; z-index: 1000;
+    }
+    .toast-success { background: #059669; }
+    .toast-error { background: #dc2626; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <h1>Trading Bot Mission Control</h1>
+        <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">BTC/USDT Rule-Based Perpetual Engine</p>
+      </div>
+      <div>
+        <span id="botStatusBadge" class="badge badge-demo">Demo Mode Running</span>
+      </div>
+    </header>
+
+    <!-- Simple Instructions Banner -->
+    <div class="guide-card">
+      <h2>🚀 How This Bot Works (3 Simple Steps)</h2>
+      <div class="steps-list">
+        <div class="step-box">
+          <strong>1. Enter Demo Keys</strong>
+          <p>Paste your Bybit Demo API Key & Secret below to let the bot paper-trade risk-free.</p>
+        </div>
+        <div class="step-box">
+          <strong>2. Complete 24h & 20 Trades</strong>
+          <p>The bot autonomously monitors trades. Live trading is physically locked until tested.</p>
+        </div>
+        <div class="step-box">
+          <strong>3. Switch to Live</strong>
+          <p>Once qualified, the "Enable Live Trading" button unlocks so you can deploy with real funds.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Grid Container -->
+    <div class="grid">
+      <!-- Card 1: Live Status & Metrics -->
+      <div class="card">
+        <h3>System Metrics <span style="font-size: 11px; color: var(--text-muted);">Auto-refreshes every 3s</span></h3>
+        <div class="metrics-row" style="margin-bottom: 12px;">
+          <div class="metric-item">
+            <div class="metric-label">Active Mode</div>
+            <div class="metric-value" id="valMode">DEMO</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">Trading Status</div>
+            <div class="metric-value" id="valStatus" style="color: #34d399;">ACTIVE</div>
+          </div>
+        </div>
+        <div class="metrics-row">
+          <div class="metric-item">
+            <div class="metric-label">Clean Demo Trades</div>
+            <div class="metric-value" id="valTrades">0 / 20</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-label">Runtime Elapsed</div>
+            <div class="metric-value" id="valHours">0.0h / 24h</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 2: Demo Qualification Gate -->
+      <div class="card">
+        <h3>Demo Qualification Gate</h3>
+        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+          To protect capital, live trading is locked until Strategy 1 proves stability in Bybit Demo.
+        </p>
+
+        <div class="qual-row">
+          <span>Runtime Progress (Min 24h)</span>
+          <span id="textHoursProgress">0 / 24 hrs</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div id="barHours" class="progress-bar-fill"></div>
+        </div>
+
+        <div class="qual-row" style="margin-top: 10px;">
+          <span>Clean Trades (Min 20 trades)</span>
+          <span id="textTradesProgress">0 / 20 trades</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div id="barTrades" class="progress-bar-fill"></div>
+        </div>
+
+        <button id="btnEnableLive" class="btn btn-success" style="margin-top: 16px;" disabled onclick="activateLiveMode()">
+          🔒 Enable Live Trading (Locked)
+        </button>
+      </div>
+
+      <!-- Card 3: Bybit Demo API Keys -->
+      <div class="card">
+        <h3>Bybit Demo API Key Vault</h3>
+        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+          Create a key on Bybit Demo with <strong>Contract Orders & Position</strong> permissions.
+        </p>
+        <div class="form-group">
+          <label>Demo API Key</label>
+          <input type="text" id="demoApiKey" placeholder="Enter Bybit Demo Key">
+        </div>
+        <div class="form-group">
+          <label>Demo API Secret</label>
+          <input type="password" id="demoApiSecret" placeholder="Enter Bybit Demo Secret">
+        </div>
+        <button class="btn btn-primary" onclick="saveKeys('demo')">Save Demo Keys</button>
+      </div>
+
+      <!-- Card 4: Bybit Live API Keys -->
+      <div class="card">
+        <h3>Bybit Live API Key Vault</h3>
+        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+          Used strictly once demo testing completes. API keys remain trade-only.
+        </p>
+        <div class="form-group">
+          <label>Live API Key</label>
+          <input type="text" id="liveApiKey" placeholder="Enter Bybit Live Key">
+        </div>
+        <div class="form-group">
+          <label>Live API Secret</label>
+          <input type="password" id="liveApiSecret" placeholder="Enter Bybit Live Secret">
+        </div>
+        <button class="btn btn-primary" onclick="saveKeys('live')">Save Live Keys</button>
+      </div>
+
+      <!-- Card 5: Emergency Controls -->
+      <div class="card" style="grid-column: 1 / -1; border-color: rgba(239, 68, 68, 0.4);">
+        <h3 style="color: #f87171;">⚠️ Emergency Stop & Kill Switch</h3>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+          Instantly cancels all pending orders, closes open positions at market, and disarms the engine.
+        </p>
+        <button class="btn btn-danger" style="max-width: 250px;" onclick="triggerKillSwitch()">
+          ENGAGE EMERGENCY KILL SWITCH
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    function showToast(msg, isError = false) {
+      const t = document.getElementById("toast");
+      t.innerText = msg;
+      t.className = isError ? "toast-error" : "toast-success";
+      t.style.display = "block";
+      setTimeout(() => { t.style.display = "none"; }, 3500);
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/api/status");
+        if (!res.ok) return;
+        const data = await res.json();
+
+        // Update metrics
+        document.getElementById("valMode").innerText = data.current_mode;
+        document.getElementById("valStatus").innerText = data.status;
+        document.getElementById("valStatus").style.color = data.status === "RUNNING" ? "#34d399" : "#f87171";
+
+        // Update badge
+        const badge = document.getElementById("botStatusBadge");
+        if (data.status !== "RUNNING") {
+          badge.className = "badge badge-stopped";
+          badge.innerText = "System Stopped";
+        } else if (data.current_mode === "LIVE") {
+          badge.className = "badge badge-live";
+          badge.innerText = "LIVE Trading Active";
+        } else {
+          badge.className = "badge badge-demo";
+          badge.innerText = "Demo Testing Mode";
+        }
+
+        const q = data.demo_qualification;
+        document.getElementById("valTrades").innerText = `${q.clean_trades} / 20`;
+        document.getElementById("valHours").innerText = `${q.elapsed_hours}h / 24h`;
+
+        // Progress bars
+        const pctHours = Math.min(100, (q.elapsed_hours / 24.0) * 100);
+        const pctTrades = Math.min(100, (q.clean_trades / 20.0) * 100);
+        document.getElementById("barHours").style.width = pctHours + "%";
+        document.getElementById("barTrades").style.width = pctTrades + "%";
+        document.getElementById("textHoursProgress").innerText = `${q.elapsed_hours} / 24 hrs`;
+        document.getElementById("textTradesProgress").innerText = `${q.clean_trades} / 20 trades`;
+
+        // Live button state
+        const btnLive = document.getElementById("btnEnableLive");
+        if (q.is_live_unlocked) {
+          btnLive.disabled = false;
+          btnLive.innerText = "🚀 Unlock Live Trading Now";
+        } else {
+          btnLive.disabled = true;
+          btnLive.innerText = "🔒 Enable Live Trading (Locked)";
+        }
+      } catch (err) {
+        console.error("Failed to fetch status:", err);
+      }
+    }
+
+    async function saveKeys(accountType) {
+      const apiKey = document.getElementById(accountType + "ApiKey").value.trim();
+      const apiSecret = document.getElementById(accountType + "ApiSecret").value.trim();
+      if (!apiKey || !apiSecret) {
+        showToast("Please enter both API key and secret.", true);
+        return;
+      }
+      try {
+        const res = await fetch("/api/keys", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_type: accountType, api_key: apiKey, api_secret: apiSecret })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          showToast(d.status || "Keys saved successfully!");
+        } else {
+          showToast(d.detail || "Error saving keys", true);
+        }
+      } catch (err) {
+        showToast("Network error saving keys", true);
+      }
+    }
+
+    async function activateLiveMode() {
+      try {
+        const res = await fetch("/api/live/enable", { method: "POST" });
+        const d = await res.json();
+        if (res.ok) {
+          showToast("Live Trading Activated successfully!");
+          fetchStatus();
+        } else {
+          showToast(d.detail || "Failed to activate live trading", true);
+        }
+      } catch (err) {
+        showToast("Network error activating live trading", true);
+      }
+    }
+
+    async function triggerKillSwitch() {
+      if (!confirm("Are you sure you want to engage the EMERGENCY KILL SWITCH? This will stop all trading.")) return;
+      try {
+        const res = await fetch("/api/emergency/kill", { method: "POST" });
+        const d = await res.json();
+        showToast(d.message || "Kill switch engaged", true);
+        fetchStatus();
+      } catch (err) {
+        showToast("Network error engaging kill switch", true);
+      }
+    }
+
+    // Poll status periodically
+    fetchStatus();
+    setInterval(fetchStatus, 3000);
+  </script>
+</body>
+</html>
