@@ -59,6 +59,14 @@ class TradeStatsTracker:
         self._next_id += 1
         return trade
 
+    def restore_trades(self, rows: List[Dict[str, Any]]) -> None:
+        """Replace the in-memory list with saved trades (any order). Ids continue from
+        the highest saved id so new trades never reuse an old one."""
+        restored = [TradeRecord(**row) for row in rows]
+        restored.sort(key=lambda t: t.id, reverse=True)  # newest first
+        self.trades = restored
+        self._next_id = (restored[0].id + 1) if restored else 1
+
     def get_stats(self, mode: str) -> Dict[str, Any]:
         filtered = [t for t in self.trades if t.mode == mode.upper()]
         total_trades = len(filtered)

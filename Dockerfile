@@ -25,7 +25,8 @@ RUN pip install --no-cache-dir \
     pydantic \
     aiosqlite \
     python-telegram-bot \
-    jinja2
+    jinja2 \
+    cryptography
 
 # Copy source code and templates
 COPY src/ /app/src/

@@ -25,3 +25,8 @@ dependencies = [
     "jinja2",
     "typer",
 ]
+
+[project.optional-dependencies]
+# Encrypts API keys and the Telegram token before they are saved to disk. Without it,
+# secrets are kept in memory only and must be re-entered after a restart.
+secrets = ["cryptography"]

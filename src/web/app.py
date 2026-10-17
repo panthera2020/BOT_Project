@@ -3,27 +3,39 @@ FastAPI administration console, credential management, demo qualification gate,
 trade stats for Demo and Live, and autonomous testing engine.
 """
 import os
+import json
 import asyncio
 import logging
 import secrets
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
+from functools import lru_cache
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from src.core.console_state import (
+    apply_resume_policy,
+    has_any_secret,
+    restore_plain,
+    restore_secrets,
+    snapshot_plain,
+    snapshot_secrets,
+)
 from src.core.daily_cap import get_trading_day_id
 from src.core.demo_gate import evaluate_demo_gate
 from src.core.trade_stats import TradeStatsTracker
 from src.alerts.notifier import AlertDispatcher
+from src.storage.secrets_box import SecretsBox
 from src.storage.state_store import StateStore
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    # Restore the demo clock and clean-trade count saved before the last restart.
+    # Bring back everything saved before the last restart (flags, clock, trades, keys...).
     await load_persisted_state()
     yield
 
@@ -46,20 +58,9 @@ logger = logging.getLogger("WebConsole")
 if ADMIN_PASS == DEFAULT_ADMIN_PASS:
     logger.warning("ADMIN_PASS is the public default; set ADMIN_USER and ADMIN_PASS environment variables.")
 
-# Global trade tracker instance
+# Global trade tracker instance. It starts empty: stats only ever show real trades
+# (a made-up seed trade used to live here and would have polluted the 24h demo test).
 STATS_TRACKER = TradeStatsTracker()
-
-# Pre-populate 1 seed simulated trade to demonstrate immediate stats in demo
-STATS_TRACKER.record_completed_trade(
-    mode="DEMO",
-    symbol="BTCUSDT",
-    side="Buy",
-    qty=0.002,
-    entry_price=99655.0,
-    exit_price=100735.0,
-    pnl_usd=2.16,
-    pnl_r=2.16,
-)
 
 # Global runtime state container
 RUNTIME_STATE = {
@@ -77,42 +78,176 @@ RUNTIME_STATE = {
     "telegram_config": {"bot_token": "", "chat_id": ""},
 }
 
-# The demo clock and clean-trade count are saved here so a restart does not reset the
-# 24h / 20-trade gate. DATABASE_URL is set in the Dockerfile (/data/trading_bot.db).
-# When it is unset (local runs, tests) nothing is saved. The file only survives
-# restarts if /data sits on a persistent disk; on hosts with an ephemeral filesystem
-# it is lost on every redeploy.
+# Everything the console needs to carry on after a restart is saved to one SQLite file:
+# flags, kill switch, the demo clock and clean-trade count, the open position, the
+# Telegram chat id, closed trades, and (encrypted) API keys and the Telegram token.
+#
+#   DATABASE_URL          path of the SQLite file (the Dockerfile sets /data/trading_bot.db;
+#                         on a phone or PC point it at a file on storage that survives
+#                         restarts). Unset = nothing is saved (tests, quick local runs).
+#   STATE_ENCRYPTION_KEY  passphrase (12+ characters) that encrypts the secrets. Without
+#                         it, secrets are NEVER written to disk and must be re-entered
+#                         after a restart.
+#   AUTO_RESUME_LIVE      "1" lets live trading restart by itself after a restart. Off
+#                         by default; demo testing always resumes by itself.
+#
+# The file only survives a restart if it sits on storage that survives restarts.
 STATE_DB_PATH = os.environ.get("DATABASE_URL", "")
-_KEY_DEMO_START = "demo_run_start_time"
-_KEY_CLEAN_TRADES = "clean_demo_trade_count"
+_KEY_STATE = "console_state"
+_KEY_SECRETS = "console_secrets"
+
+# Saves are serialized so two near-simultaneous changes can never write an older snapshot
+# over a newer one: each save builds its snapshot only once it holds the lock.
+_SAVE_LOCK = asyncio.Lock()
+
+# What the last startup restored and what did not resume, shown in /api/status.
+PERSISTENCE_INFO: Dict[str, Any] = {"resumed": [], "notes": [], "last_saved_utc": None}
 
 
-async def _persist_state(key: str, value: str) -> None:
+@lru_cache(maxsize=4)
+def _box_for(passphrase: str) -> SecretsBox:
+    return SecretsBox(passphrase)  # key stretching is slow, so build it once per passphrase
+
+
+def _secrets_box() -> SecretsBox:
+    return _box_for(os.environ.get("STATE_ENCRYPTION_KEY", ""))
+
+
+def _auto_resume_live() -> bool:
+    return os.environ.get("AUTO_RESUME_LIVE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _plain_json() -> str:
+    return json.dumps(snapshot_plain(RUNTIME_STATE))
+
+
+async def save_console_state(secrets_changed: bool = False) -> bool:
+    """Save the whole console state in one all-or-nothing write. Returns True if saved.
+
+    Never raises: a storage problem is logged and the console keeps running. Secrets are
+    rewritten only when secrets_changed is True. If they cannot be encrypted, the old
+    saved copy is removed (so stale keys cannot come back) and nothing secret is written.
+    """
     if not STATE_DB_PATH:
-        return
+        return False
     try:
-        store = StateStore(db_path=STATE_DB_PATH)
-        await store.init_db()
-        await store.set_state(key, value)
+        async with _SAVE_LOCK:
+            store = StateStore(db_path=STATE_DB_PATH)
+            await store.init_db()
+            items = {_KEY_STATE: _plain_json()}
+            drop_old_secrets = False
+            if secrets_changed:
+                box = _secrets_box()
+                if box.available:
+                    items[_KEY_SECRETS] = box.encrypt(json.dumps(snapshot_secrets(RUNTIME_STATE)))
+                else:
+                    drop_old_secrets = True
+                    if has_any_secret(snapshot_secrets(RUNTIME_STATE)):
+                        logger.warning(
+                            "API keys / Telegram token are NOT saved to disk: %s. "
+                            "They will have to be re-entered after a restart.", box.unavailable_reason,
+                        )
+            await store.set_many(items)
+            if drop_old_secrets:
+                await store.delete_state(_KEY_SECRETS)
+        PERSISTENCE_INFO["last_saved_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return True
     except Exception as exc:  # never let a storage problem take the console down
-        logger.warning("Could not save %s to %s: %s", key, STATE_DB_PATH, exc)
+        logger.warning("Could not save console state to %s: %s", STATE_DB_PATH, exc)
+        return False
 
 
 async def load_persisted_state() -> None:
-    """Restore the demo clock and clean-trade count saved before the last restart."""
+    """Bring back everything saved before the last restart, then apply the resume policy."""
+    PERSISTENCE_INFO["resumed"] = []
+    PERSISTENCE_INFO["notes"] = []
     if not STATE_DB_PATH:
+        logger.warning("DATABASE_URL is not set: nothing is saved, so a restart starts from scratch.")
+        PERSISTENCE_INFO["notes"].append("Saving is OFF (DATABASE_URL is not set): a restart starts from scratch.")
         return
+
+    notes: List[str] = []
     try:
         store = StateStore(db_path=STATE_DB_PATH)
         await store.init_db()
-        started = await store.get_state(_KEY_DEMO_START)
-        count = await store.get_state(_KEY_CLEAN_TRADES)
-        if started:
-            RUNTIME_STATE["demo_run_start_time"] = datetime.fromisoformat(started)
-        if count is not None:
-            RUNTIME_STATE["clean_demo_trade_count"] = int(count)
+
+        raw = await store.get_state(_KEY_STATE)
+        if raw:
+            try:
+                problems = restore_plain(RUNTIME_STATE, json.loads(raw))
+            except ValueError:
+                problems = ["saved state could not be read; starting from defaults"]
+            for problem in problems:
+                logger.warning("Saved state: %s", problem)
+            if problems:
+                notes.append("Some saved state was damaged and was skipped; see the server log.")
+
+        blob = await store.get_state(_KEY_SECRETS)
+        if blob:
+            box = _secrets_box()
+            if not box.available:
+                notes.append(
+                    f"Saved API keys exist but cannot be unlocked: {box.unavailable_reason}. "
+                    "Set STATE_ENCRYPTION_KEY or re-enter the keys."
+                )
+            else:
+                text = box.decrypt(blob)
+                if text is None:
+                    notes.append("Saved API keys could not be decrypted (wrong STATE_ENCRYPTION_KEY or damaged data). Re-enter the keys.")
+                else:
+                    try:
+                        for problem in restore_secrets(RUNTIME_STATE, json.loads(text)):
+                            logger.warning("Saved secrets: %s", problem)
+                    except ValueError:
+                        notes.append("Saved API keys were damaged. Re-enter the keys.")
+
+        STATS_TRACKER.restore_trades(await store.load_trades())
+
+        gate = evaluate_demo_gate(RUNTIME_STATE["demo_run_start_time"], RUNTIME_STATE["clean_demo_trade_count"])
+        resumed, policy_notes = apply_resume_policy(RUNTIME_STATE, gate.is_unlocked, _auto_resume_live())
+        PERSISTENCE_INFO["resumed"] = resumed
+        PERSISTENCE_INFO["notes"] = notes + policy_notes
+        await save_console_state()  # make the disk match what the resume policy decided
     except Exception as exc:
         logger.warning("Could not load saved state from %s: %s", STATE_DB_PATH, exc)
+        PERSISTENCE_INFO["notes"] = notes + [f"Saved state could not be loaded ({exc}); starting from defaults."]
+
+
+async def record_trade(
+    mode: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    pnl_usd: float,
+    pnl_r: float,
+    clean: bool = False,
+):
+    """Record a closed trade in the stats and save it. A trade that counts toward the
+    24h / 20-trade gate is saved together with the new count in one all-or-nothing write,
+    so a crash can never record the trade without the count (or the reverse)."""
+    trade = STATS_TRACKER.record_completed_trade(
+        mode=mode,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        pnl_usd=pnl_usd,
+        pnl_r=pnl_r,
+    )
+    if clean:
+        RUNTIME_STATE["clean_demo_trade_count"] += 1
+    if STATE_DB_PATH:
+        try:
+            async with _SAVE_LOCK:
+                store = StateStore(db_path=STATE_DB_PATH)
+                await store.init_db()
+                await store.save_trade(asdict(trade), {_KEY_STATE: _plain_json()})
+        except Exception as exc:
+            logger.warning("Could not save trade %s to %s: %s", trade.id, STATE_DB_PATH, exc)
+    return trade
 
 
 async def record_demo_trade(
@@ -127,24 +262,51 @@ async def record_demo_trade(
 ):
     """The one place a closed demo trade is recorded. The trading engine calls this.
 
-    Adds the trade to the stats and, when it is clean, counts it toward the 20-trade
-    gate and saves the new count. What counts as "clean" is still an open decision in
-    the PRD; the caller decides, and the default counts every properly closed trade.
+    The trade is added to the stats and saved; when it is clean it also counts toward the
+    20-trade gate. What counts as "clean" is still an open decision in the PRD; the caller
+    decides, and the default counts every properly closed trade.
     """
-    trade = STATS_TRACKER.record_completed_trade(
-        mode="DEMO",
-        symbol=symbol,
-        side=side,
-        qty=qty,
-        entry_price=entry_price,
-        exit_price=exit_price,
-        pnl_usd=pnl_usd,
-        pnl_r=pnl_r,
-    )
-    if clean:
-        RUNTIME_STATE["clean_demo_trade_count"] += 1
-        await _persist_state(_KEY_CLEAN_TRADES, str(RUNTIME_STATE["clean_demo_trade_count"]))
-    return trade
+    return await record_trade("DEMO", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, clean=clean)
+
+
+async def record_live_trade(
+    symbol: str,
+    side: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    pnl_usd: float,
+    pnl_r: float,
+):
+    """The one place a closed live trade is recorded. The trading engine calls this."""
+    return await record_trade("LIVE", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r)
+
+
+def _persistence_status() -> Dict[str, Any]:
+    box = _secrets_box()
+    enabled = bool(STATE_DB_PATH)
+    return {
+        "enabled": enabled,
+        "secrets_saved_encrypted": enabled and box.available,
+        "secrets_note": (
+            f"API keys and the Telegram token are NOT saved to disk: {box.unavailable_reason}."
+            if enabled and not box.available
+            else None
+        ),
+        "last_saved_utc": PERSISTENCE_INFO["last_saved_utc"],
+        "resumed": list(PERSISTENCE_INFO["resumed"]),
+        "notes": list(PERSISTENCE_INFO["notes"]),
+    }
+
+
+async def _save_secrets_and_describe() -> Dict[str, Any]:
+    """Save after a keys or Telegram change and tell the caller what actually reached disk."""
+    saved = await save_console_state(secrets_changed=True)
+    box = _secrets_box()
+    result: Dict[str, Any] = {"saved_to_disk": bool(saved and box.available)}
+    if STATE_DB_PATH and not box.available:
+        result["note"] = f"Kept in memory only, not saved to disk: {box.unavailable_reason}."
+    return result
 
 
 def _credentials_valid(username: str, password: str) -> bool:
@@ -255,28 +417,34 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
             "is_configured": bool(RUNTIME_STATE["telegram_config"]["bot_token"] and RUNTIME_STATE["telegram_config"]["chat_id"]),
             "chat_id": RUNTIME_STATE["telegram_config"]["chat_id"],
         },
+        "persistence": _persistence_status(),
     }
 
 
 @app.post("/api/keys")
-async def save_api_keys(payload: APIKeyPayload, user: str = Depends(authenticate_admin)) -> Dict[str, str]:
+async def save_api_keys(payload: APIKeyPayload, user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     if payload.account_type.lower() == "demo":
         RUNTIME_STATE["bybit_demo_keys"]["api_key"] = payload.api_key
         RUNTIME_STATE["bybit_demo_keys"]["api_secret"] = payload.api_secret
-        return {"status": "Demo keys stored successfully"}
+        message = "Demo keys stored successfully"
     elif payload.account_type.lower() == "live":
         RUNTIME_STATE["bybit_live_keys"]["api_key"] = payload.api_key
         RUNTIME_STATE["bybit_live_keys"]["api_secret"] = payload.api_secret
-        return {"status": "Live keys stored successfully"}
+        message = "Live keys stored successfully"
     else:
         raise HTTPException(status_code=400, detail="Invalid account_type. Must be 'demo' or 'live'")
+    return {"status": message, **await _save_secrets_and_describe()}
 
 
 @app.post("/api/telegram")
-async def save_telegram_config(payload: TelegramPayload, user: str = Depends(authenticate_admin)) -> Dict[str, str]:
+async def save_telegram_config(payload: TelegramPayload, user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     RUNTIME_STATE["telegram_config"]["bot_token"] = payload.bot_token.strip()
     RUNTIME_STATE["telegram_config"]["chat_id"] = payload.chat_id.strip()
-    return {"status": "SUCCESS", "message": "Telegram credentials saved successfully."}
+    return {
+        "status": "SUCCESS",
+        "message": "Telegram credentials saved successfully.",
+        **await _save_secrets_and_describe(),
+    }
 
 
 @app.post("/api/telegram/test")
@@ -308,17 +476,18 @@ async def start_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[st
     # pausing, stopping or restarting.
     if RUNTIME_STATE["demo_run_start_time"] is None:
         RUNTIME_STATE["demo_run_start_time"] = datetime.now(timezone.utc)
-        await _persist_state(_KEY_DEMO_START, RUNTIME_STATE["demo_run_start_time"].isoformat())
     RUNTIME_STATE["demo_testing_active"] = True
     RUNTIME_STATE["current_mode"] = "DEMO"
     RUNTIME_STATE["is_bot_running"] = True
     RUNTIME_STATE["kill_switch_triggered"] = False
+    await save_console_state()
     return {"status": "SUCCESS", "message": "Demo Testing Started! Unrestricted trade cap active."}
 
 
 @app.post("/api/demo/stop")
 async def stop_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     RUNTIME_STATE["demo_testing_active"] = False
+    await save_console_state()
     return {"status": "PAUSED", "message": "Demo Testing Paused."}
 
 
@@ -344,12 +513,14 @@ async def start_live_trading(user: str = Depends(authenticate_admin)) -> Dict[st
     RUNTIME_STATE["current_mode"] = "LIVE"
     RUNTIME_STATE["is_bot_running"] = True
     RUNTIME_STATE["kill_switch_triggered"] = False
+    await save_console_state()
     return {"status": "SUCCESS", "message": "Live Trading Active! Enforcing 2 trades/day cap."}
 
 
 @app.post("/api/live/stop")
 async def stop_live_trading(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     RUNTIME_STATE["live_trading_active"] = False
+    await save_console_state()
     return {"status": "PAUSED", "message": "Live Trading Paused."}
 
 
@@ -360,4 +531,5 @@ async def trigger_emergency_kill(user: str = Depends(authenticate_admin)) -> Dic
     RUNTIME_STATE["live_trading_active"] = False
     RUNTIME_STATE["kill_switch_triggered"] = True
     RUNTIME_STATE["active_position"] = None
+    await save_console_state()
     return {"status": "HALTED", "message": "Kill switch engaged. System halted and new orders blocked."}

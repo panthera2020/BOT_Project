@@ -1,4 +1,4 @@
-# Handoff and Status (v1.4, 2026-10-17)
+# Handoff and Status (v1.5, 2026-10-17)
 
 **Update this file every time the work changes, and prepare a fresh copy whenever usage is about to run out.**
 
@@ -8,8 +8,9 @@
 - Stack: Python 3.10+ (`asyncio`), FastAPI, Uvicorn, HTTPX, Aiosqlite, Docker.
 - The strategy, risk and exit logic exist and have unit tests. The web console is deployed, but **it does not run the strategy yet** (section 4).
 - Admin login failed on the deployed page because the sign-in form described in the old handoff (v1.2) was never pushed to GitHub (section 3). The fix is on `main` (v1.3 commit `4a84047`).
-- v1.4 fixes the demo gate (24h and 20 clean trades): the clock now starts at the first "Start Demo Testing" and, together with the clean-trade count, is saved in SQLite so a restart no longer resets it (section 4). The loop that actually places demo trades is still not built, so the count stays at 0 until it is.
-- Tests: `pytest -q` gives 48 passed (run in the v1.4 session, in several test orders), and a real uvicorn restart was smoke-tested. The sign-in page itself has not been opened in a browser.
+- v1.4 fixed the demo gate (24h and 20 clean trades): the clock starts at the first "Start Demo Testing" and is not reset by pausing or restarting.
+- v1.5 adds full state continuity (section 4): flags, kill switch, demo clock and count, open position, Telegram settings, closed trades and (encrypted) API keys are saved to a local SQLite file on every change and restored on startup, so a restart or a hard kill no longer wipes the console. The loop that actually places demo trades is still not built, so the trade count stays at 0 until it is.
+- Tests: `pytest -q` gives 97 passed with the `cryptography` package installed, and 84 passed + 13 skipped (skips are the encryption-dependent tests, with a visible reason) without it. Run in several test orders. A real server was also killed with `kill -9` and restarted: demo state, clock, 21 trades, keys and Telegram settings came back, no secret was readable on disk, and live trading did not restart by itself. The sign-in page itself has not been opened in a browser.
 
 ## 2. What exists in the code
 
@@ -22,9 +23,11 @@
 | Exit policy | `src/core/exit_policy.py` | TP1 70%, TP2 5R, breakeven, early exit |
 | Exchange adapters | `src/exchange/adapter.py`, `bybit_adapter.py` | Fake adapter and Bybit V5 REST |
 | Alerts | `src/alerts/notifier.py` | Telegram via HTTPX; email dispatcher |
-| State store | `src/storage/state_store.py` | SQLite (aiosqlite) |
+| State store | `src/storage/state_store.py` | SQLite (aiosqlite): key-value state, all-or-nothing multi-key saves, `trade_history` table |
+| Secrets at rest | `src/storage/secrets_box.py` | Fernet encryption (optional `cryptography` package); never writes a secret in plain text |
+| What is saved / resume rules | `src/core/console_state.py` | Pure functions: snapshot, restore with per-field validation, resume policy |
 | Web console | `src/web/app.py`, `src/web/templates/index.html` | FastAPI; see sections 3 and 4 |
-| Trade stats | `src/core/trade_stats.py` | In-memory |
+| Trade stats | `src/core/trade_stats.py` | In-memory, restored from `trade_history` on startup |
 
 Not built yet: the bot wallet ledger and 24-hour withdrawal lock, a backtest runner, and the loop that connects the strategy to the exchange (section 4). The PRD (`PRD.md`, `PRD.pdf`) describes all of them. A longer PRD v0.1 also exists as a Claude doc: https://claude.ai/code/artifact/848b4084-07c8-4e3f-9057-85a781feed66 (its Strategy 1 section is still a placeholder).
 
@@ -43,10 +46,18 @@ Not built yet: the bot wallet ledger and 24-hour withdrawal lock, a backtest run
 ## 4. Known gaps (read before trusting the dashboard)
 
 - "Start Demo Testing" and "Start Live Trading" only flip flags in `RUNTIME_STATE`. Nothing in `src/` calls `Strategy1StateMachine`, so the Market Radar text and "last scan" time are static. `BotEngine` in `src/main.py` only has `start` and `stop`.
-- **Demo gate (fixed in v1.4, but nothing feeds it yet).** The rule is live >= 24h since the first "Start Demo Testing" AND >= 20 clean demo trades. The clock is not reset by pausing or restarting. Before v1.4 the clock started at server boot and the count was never incremented. `record_demo_trade(...)` in `src/web/app.py` is now the single place a closed demo trade is recorded and counted; **the engine must call it when a demo trade closes**, and nothing does yet. What counts as "clean" is still an open PRD decision: the default counts every properly closed demo trade, and the caller can pass `clean=False`.
-- The clock and clean-trade count are saved to the SQLite file in `DATABASE_URL` (`/data/trading_bot.db` in the Docker image) and reloaded on startup. **This only survives a restart if `/data` is on a persistent disk.** On hosts with an ephemeral filesystem (Back4app and Render free tiers) the file is lost on redeploy, and the 24h clock restarts. If `DATABASE_URL` is unset (local runs, tests) nothing is saved.
-- `src/web/app.py` seeds one made-up demo trade (about +2.16R) so the stats are not empty. It does not count toward the gate. Remove it when real trades are wired in.
-- The rest of the console state (API keys, Telegram settings, the demo/live on-off flags, the trade list and stats) still lives in memory and is lost on every restart or sleep, so after a restart the bot comes back stopped. API keys are stored unencrypted in memory.
+- **Demo gate (rule fixed in v1.4, but nothing feeds it yet).** Live unlocks at >= 24h since the first "Start Demo Testing" AND >= 20 clean demo trades. `record_demo_trade(...)` and `record_live_trade(...)` in `src/web/app.py` are the only places a closed trade is recorded; **the engine must call them when a trade closes**, and nothing does yet. A clean demo trade is saved together with the new count in one all-or-nothing write. What counts as "clean" is still an open PRD decision: the default counts every properly closed demo trade, and the caller can pass `clean=False`.
+- **State continuity (v1.5).** Everything below is saved to one SQLite file on every change and restored on startup. If the process is killed at any moment, the last completed save is what comes back.
+  - Saved: demo/live on-off flags, kill switch, current mode, demo clock, clean-trade count, open position, Telegram chat id, closed trades (Demo and Live), and API keys and the Telegram token (encrypted).
+  - Settings (environment variables):
+    - `DATABASE_URL`: path of the SQLite file (the Dockerfile sets `/data/trading_bot.db`). Unset means nothing is saved and the app logs a warning.
+    - `STATE_ENCRYPTION_KEY`: passphrase of 12+ characters. Without it (or without the `cryptography` package) API keys and the Telegram token are **never written to disk** and must be re-entered after a restart; `/api/status` says so under `persistence`. If this key is lost, only the keys are lost, not the rest of the state.
+    - `AUTO_RESUME_LIVE`: set to `1` to let live trading restart by itself. Default off.
+  - Resume policy after a restart: demo testing that was running resumes by itself. **Live trading does NOT resume** unless `AUTO_RESUME_LIVE=1`, the 24h/20-trade gate is still unlocked and live keys are present; otherwise it stays paused and needs one press of Start Live Trading. This is deliberate: real money must not restart unattended before the engine can check Bybit for open positions. If the kill switch was engaged, everything stays stopped.
+  - `/api/status` has a `persistence` block: whether saving is on, whether secrets are saved encrypted, when state was last saved, what resumed, and notes (for example "live trading was NOT resumed").
+  - The file only survives restarts if it sits on storage that survives restarts. On Back4app and Render free tiers the filesystem is wiped on redeploy or restart, so this does not help there (section 5).
+  - Not done: after a restart the open position is restored from the saved record but is **not yet checked against what Bybit actually has open** (the engine does not exist yet); there is no network retry/backoff (also the engine's job); API keys are held unencrypted in memory while the app runs; the dashboard page does not show the `persistence` block yet.
+- The made-up seed trade was removed in v1.5, so stats only show real trades.
 
 ## 5. Hosting
 
@@ -55,7 +66,9 @@ Not built yet: the bot wallet ledger and 24-hour withdrawal lock, a backtest run
   - **Koyeb:** the card-free plan was removed in February 2026, a card is required, and the free instance scales to zero after 1 hour idle. The old v1.2 recommendation of Koyeb with no card is probably out of date.
   - **Render:** no card, 750 instance-hours per month, spins down after 15 minutes without inbound traffic and takes about a minute to wake.
   - **Fly.io:** no free plan for new customers; trial only.
-- No free option stays awake with a persistent disk. Choices: Render free plus an external pinger (state is still lost on restarts), an always-on PC, or a small paid VPS. Decide before wiring in the live loop.
+- No free hosted option stays awake with a persistent disk. Render's own docs say a free web service has an ephemeral filesystem (SQLite files are lost on every redeploy, restart or spin-down) and that its free Postgres expires after 30 days with a 14-day grace period before deletion (https://render.com/docs/free). Koyeb and Fly.io need a card.
+- **An always-on device you control keeps the state file**, with no card needed: a phone running Termux, a spare PC or a Raspberry Pi. Android may kill background apps, so battery optimization must be turned off for the terminal app and a wake lock held; this was not verified in this session, so check Termux's current docs. Open the dashboard through a private tunnel such as Tailscale rather than a public URL (free-tier terms not verified).
+- Other options: Render free plus an external pinger and an external free database (for example Neon, which needs no card; the state layer would have to be moved to Postgres, which is not built), or a small paid VPS (about $4-5 a month, needs a payment method). Decide before wiring in the live loop.
 - Repo has a `Dockerfile` (port 8080, `PORT` env var) and a `fly.toml`.
 
 ## 6. Run, test and push
@@ -73,20 +86,25 @@ Get the latest code (the v1.3 login fix and the v1.4 demo gate are both on `main
 git pull origin main
 ```
 
-Run locally with your own credentials:
+Run locally with your own credentials and saved state (Windows shown; use `export` on Linux or Android):
 
 ```bash
+pip install -e ".[secrets]"        # adds the cryptography package; on Termux the platform's own package may be needed
 set ADMIN_USER=you@example.com
 set ADMIN_PASS=choose-a-long-password
+set DATABASE_URL=C:\bot-state\trading_bot.db
+set STATE_ENCRYPTION_KEY=a-long-passphrase-you-keep-safe
 uvicorn src.web.app:app --port 8080
 ```
 
+Keep the `DATABASE_URL` file on storage that survives restarts and back it up. Keep `STATE_ENCRYPTION_KEY` out of the repository and out of the state file's folder.
+
 ## 7. Next steps, in order
 
-1. Set `ADMIN_USER` and `ADMIN_PASS` on the host, redeploy from `main`, and confirm you can sign in.
-2. Choose a host that can stay up (section 5).
-3. Wire the engine: candle polling, `Strategy1StateMachine`, risk and net RR gates, demo orders on Bybit demo, and a call to `record_demo_trade(...)` when each demo trade closes (this is what makes the gate unlock). Remove the seeded trade.
-4. Persist keys (encrypted), the trade list and the on/off flags in SQLite. Gate state is already saved (v1.4).
+1. Choose where it runs (section 5). Set `ADMIN_USER`, `ADMIN_PASS`, `DATABASE_URL` and `STATE_ENCRYPTION_KEY`, run from `main`, and confirm you can sign in and that state survives a restart.
+2. Wire the engine: candle polling with retry/backoff, `Strategy1StateMachine`, risk and net RR gates, demo orders on Bybit demo with stop and take-profit placed on Bybit itself, and a call to `record_demo_trade(...)` / `record_live_trade(...)` when each trade closes (this is what makes the gate unlock).
+3. On startup the engine must ask Bybit for open positions and orders and reconcile them with the saved `active_position` before trading. Once that exists, `AUTO_RESUME_LIVE` can be reconsidered.
+4. Show the `persistence` block on the dashboard.
 5. Build the wallet ledger and 24-hour withdrawal lock, then the backtest runner.
 6. Open decisions from the PRD: risk guard below $50, leverage tiers (100x from $10 to $50, 50x above, below $10 no trading), alert channel, and how many clean demo trades before live.
 

@@ -65,6 +65,25 @@ class StateStore:
                 );
             """)
 
+            # Closed trades shown on the console (Demo and Live). The id is the id the
+            # in-memory tracker assigned, so ids continue unbroken after a restart.
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS trade_history (
+                    id INTEGER PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL NOT NULL,
+                    pnl_usd REAL NOT NULL,
+                    pnl_r REAL NOT NULL,
+                    is_win INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    timestamp TEXT NOT NULL
+                );
+            """)
+
             # 24-hour withdrawal lock requests
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS withdrawal_requests (
@@ -87,6 +106,58 @@ class StateStore:
                 (key, value),
             )
             await db.commit()
+
+    async def set_many(self, items: Dict[str, str]) -> None:
+        """Save several keys in ONE transaction: either all are saved or none are, so a
+        power cut mid-write can never leave a half-updated state."""
+        async with aiosqlite.connect(self.db_path) as db:
+            for key, value in items.items():
+                await db.execute(
+                    "INSERT INTO system_state (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+                    (key, value),
+                )
+            await db.commit()
+
+    async def delete_state(self, key: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM system_state WHERE key = ?", (key,))
+            await db.commit()
+
+    async def save_trade(self, trade: Dict[str, Any], state_items: Optional[Dict[str, str]] = None) -> None:
+        """Save one closed trade and, in the same transaction, any state that changes
+        with it (for example the clean-trade count). Either both are saved or neither."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO trade_history "
+                "(id, mode, symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, is_win, status, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    trade["id"], trade["mode"], trade["symbol"], trade["side"], trade["qty"],
+                    trade["entry_price"], trade["exit_price"], trade["pnl_usd"], trade["pnl_r"],
+                    1 if trade["is_win"] else 0, trade["status"], trade["timestamp"],
+                ),
+            )
+            for key, value in (state_items or {}).items():
+                await db.execute(
+                    "INSERT INTO system_state (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+                    (key, value),
+                )
+            await db.commit()
+
+    async def load_trades(self) -> List[Dict[str, Any]]:
+        """All saved trades, oldest first."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM trade_history ORDER BY id ASC") as cursor:
+                rows = await cursor.fetchall()
+        trades = []
+        for row in rows:
+            trade = dict(row)
+            trade["is_win"] = bool(trade["is_win"])
+            trades.append(trade)
+        return trades
 
     async def get_state(self, key: str, default: Optional[str] = None) -> Optional[str]:
         async with aiosqlite.connect(self.db_path) as db:
