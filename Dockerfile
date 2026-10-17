@@ -26,11 +26,11 @@ RUN pip install --no-cache-dir \
 COPY src/ /app/src/
 
 # Create persistent storage mount point for SQLite database
-RUN mkdir -p /data
+RUN mkdir -p /data && chmod -R 777 /data /app
 ENV DATABASE_URL="/data/trading_bot.db"
 
-# Expose internal container port
-EXPOSE 8080
+# Expose internal container ports (7860 for Hugging Face Spaces, 8080 for Render/Fly)
+EXPOSE 7860 8080
 
-# Run FastAPI server
-CMD ["uvicorn", "src.web.app:app", "--host", "0.0.0.0", "--port", "8080"]
+# Run FastAPI server adapting to environment PORT
+CMD ["sh", "-c", "uvicorn src.web.app:app --host 0.0.0.0 --port ${PORT:-7860}"]
