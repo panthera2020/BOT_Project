@@ -74,6 +74,11 @@ class TelegramPayload(BaseModel):
     chat_id: str
 
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard():
     template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
