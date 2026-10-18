@@ -48,29 +48,40 @@ class BybitV5Adapter(ExchangeAdapter):
         }
 
     async def get_candles(self, symbol: str, interval: str = "15", limit: int = 50) -> List[Dict[str, Any]]:
-        url = f"{self.base_url}/v5/market/kline"
+        """Public candles, newest first: [startTime, open, high, low, close, volume, turnover].
+
+        Market data is public and read-only, so it is read from the main Bybit host (the
+        demo host does not always serve it) and falls back to the demo host. Network and
+        API errors raise, so the caller can tell "no data" from "could not reach Bybit"."""
         params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, params=params)
-            data = resp.json()
-            if data.get("retCode") == 0:
-                # Bybit returns: [startTime, open, high, low, close, volume, turnover]
-                return data.get("result", {}).get("list", [])
-            return []
+        last_error: Optional[Exception] = None
+        for base in (self.LIVE_BASE_URL, self.DEMO_BASE_URL):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(f"{base}/v5/market/kline", params=params)
+                    data = resp.json()
+                if data.get("retCode") == 0:
+                    rows = data.get("result", {}).get("list", [])
+                    if rows:
+                        return rows
+                    last_error = RuntimeError("Bybit returned no candles")
+                else:
+                    last_error = RuntimeError(f"Bybit candles error {data.get('retCode')}: {data.get('retMsg')}")
+            except Exception as exc:  # network, TLS, JSON...
+                last_error = exc
+        raise RuntimeError(f"Could not get candles: {last_error}")
 
     async def get_balance(self) -> float:
-        url = f"{self.base_url}/v5/account/wallet-balance"
-        params = "accountType=UNIFIED"
-        headers = self._get_headers(params)
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{url}?{params}", headers=headers)
-            data = resp.json()
-            if data.get("retCode") == 0:
-                coins = data.get("result", {}).get("list", [{}])[0].get("coin", [])
-                for coin in coins:
-                    if coin.get("coin") == "USDT":
-                        return float(coin.get("walletBalance", 0.0))
-            return 0.0
+        """USDT wallet balance. Raises when Bybit cannot be reached or rejects the keys,
+        so an outage is never mistaken for an empty account."""
+        data = await self._get("/v5/account/wallet-balance", "accountType=UNIFIED")
+        if data.get("retCode") != 0:
+            raise RuntimeError(f"Bybit balance error {data.get('retCode')}: {data.get('retMsg')}")
+        accounts = data.get("result", {}).get("list", [])
+        for coin in (accounts[0].get("coin", []) if accounts else []):
+            if coin.get("coin") == "USDT":
+                return float(coin.get("walletBalance") or 0.0)
+        return 0.0
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         url = f"{self.base_url}/v5/position/set-leverage"
@@ -82,14 +93,29 @@ class BybitV5Adapter(ExchangeAdapter):
         }
         payload_str = json.dumps(payload)
         headers = self._get_headers(payload_str)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, headers=headers, content=payload_str)
             data = resp.json()
             # RetCode 0 or 110043 (leverage not modified) is considered OK
             return data.get("retCode") in [0, 110043]
 
+    async def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload_str = json.dumps(payload)
+        headers = self._get_headers(payload_str)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{self.base_url}{path}", headers=headers, content=payload_str)
+            return resp.json()
+
+    async def _get(self, path: str, params: str) -> Dict[str, Any]:
+        headers = self._get_headers(params)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{self.base_url}{path}?{params}", headers=headers)
+            return resp.json()
+
     async def place_order(self, order_req: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}/v5/order/create"
+        """Places an order. Optional order_req keys: price (Limit), reduce_only,
+        stop_loss and take_profit (set on Bybit itself, so they work even if this app
+        is offline). Returns Bybit's reply; the caller checks retCode == 0."""
         payload = {
             "category": "linear",
             "symbol": order_req["symbol"],
@@ -101,12 +127,43 @@ class BybitV5Adapter(ExchangeAdapter):
         }
         if "price" in order_req and order_req.get("order_type") == "Limit":
             payload["price"] = str(order_req["price"])
+        if order_req.get("stop_loss"):
+            payload["stopLoss"] = str(order_req["stop_loss"])
+            payload["slTriggerBy"] = "LastPrice"
+        if order_req.get("take_profit"):
+            payload["takeProfit"] = str(order_req["take_profit"])
+            payload["tpTriggerBy"] = "LastPrice"
+        if order_req.get("stop_loss") or order_req.get("take_profit"):
+            payload["tpslMode"] = "Full"
+        return await self._post("/v5/order/create", payload)
 
-        payload_str = json.dumps(payload)
-        headers = self._get_headers(payload_str)
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, content=payload_str)
-            return resp.json()
+    async def set_position_stop(self, symbol: str, stop_price: float) -> bool:
+        """Moves the stop-loss of the open position (used for the breakeven shift)."""
+        data = await self._post("/v5/position/trading-stop", {
+            "category": "linear", "symbol": symbol, "positionIdx": 0,
+            "tpslMode": "Full", "stopLoss": str(stop_price), "slTriggerBy": "LastPrice",
+        })
+        # 34040 = "not modified": the stop is already at that price
+        return data.get("retCode") in (0, 34040)
+
+    async def cancel_all_orders(self, symbol: str) -> bool:
+        data = await self._post("/v5/order/cancel-all", {"category": "linear", "symbol": symbol})
+        return data.get("retCode") == 0
+
+    async def get_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        data = await self._get("/v5/order/realtime", f"category=linear&symbol={symbol}")
+        if data.get("retCode") != 0:
+            raise RuntimeError(f"Bybit open orders error {data.get('retCode')}: {data.get('retMsg')}")
+        return data.get("result", {}).get("list", [])
+
+    async def get_closed_pnl(self, symbol: str, start_ms: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
+        params = f"category=linear&symbol={symbol}&limit={limit}"
+        if start_ms:
+            params += f"&startTime={int(start_ms)}"
+        data = await self._get("/v5/position/closed-pnl", params)
+        if data.get("retCode") != 0:
+            raise RuntimeError(f"Bybit closed pnl error {data.get('retCode')}: {data.get('retMsg')}")
+        return data.get("result", {}).get("list", [])
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         url = f"{self.base_url}/v5/order/cancel"
@@ -118,15 +175,12 @@ class BybitV5Adapter(ExchangeAdapter):
             return resp.json().get("retCode") == 0
 
     async def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
-        url = f"{self.base_url}/v5/position/list"
-        params = f"category=linear&symbol={symbol}"
-        headers = self._get_headers(params)
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{url}?{params}", headers=headers)
-            data = resp.json()
-            if data.get("retCode") == 0:
-                positions = data.get("result", {}).get("list", [])
-                for pos in positions:
-                    if float(pos.get("size", 0.0)) > 0:
-                        return pos
-            return None
+        """The open position, or None when flat. Raises if Bybit cannot be reached or
+        answers with an error, so "flat" is never guessed."""
+        data = await self._get("/v5/position/list", f"category=linear&symbol={symbol}")
+        if data.get("retCode") != 0:
+            raise RuntimeError(f"Bybit position error {data.get('retCode')}: {data.get('retMsg')}")
+        for pos in data.get("result", {}).get("list", []):
+            if float(pos.get("size") or 0.0) > 0:
+                return pos
+        return None

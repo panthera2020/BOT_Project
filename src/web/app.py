@@ -30,6 +30,8 @@ from src.core.demo_gate import evaluate_demo_gate
 from src.core.trade_stats import TradeStatsTracker
 from src.alerts.notifier import AlertDispatcher
 from src.storage.secrets_box import SecretsBox
+from src.engine.demo_engine import DemoEngine
+from src.exchange.bybit_adapter import BybitV5Adapter
 from src.storage.state_store import StateStore
 
 
@@ -37,7 +39,11 @@ from src.storage.state_store import StateStore
 async def _lifespan(_app: FastAPI):
     # Bring back everything saved before the last restart (flags, clock, trades, keys...).
     await load_persisted_state()
-    yield
+    await sync_engine()  # demo testing that was running before the restart carries on
+    try:
+        yield
+    finally:
+        await _stop_engine()
 
 
 app = FastAPI(title="Trading Bot Operations Console", version="1.1.0", lifespan=_lifespan)
@@ -76,6 +82,9 @@ RUNTIME_STATE = {
     "kill_switch_triggered": False,
     "active_position": None,  # Simulated active position
     "telegram_config": {"bot_token": "", "chat_id": ""},
+    # What the trading engine must remember across restarts (day's starting capital, the last
+    # 15m candle it looked at, an armed sweep setup). Saved with the rest of the state.
+    "engine_state": {},
 }
 
 # Everything the console needs to carry on after a restart is saved to one SQLite file:
@@ -211,6 +220,123 @@ async def load_persisted_state() -> None:
     except Exception as exc:
         logger.warning("Could not load saved state from %s: %s", STATE_DB_PATH, exc)
         PERSISTENCE_INFO["notes"] = notes + [f"Saved state could not be loaded ({exc}); starting from defaults."]
+
+
+# ---------------------------------------------------------------- trading engine
+# The engine runs as a background task inside this process while demo testing is active.
+#   BOT_ENGINE=off   disables it (used by the tests, or to run the console without trading).
+_ENGINE: Optional[DemoEngine] = None
+_ENGINE_TASK: Optional["asyncio.Task[None]"] = None
+_ENGINE_KEYS: tuple = ("", "")
+
+
+def _engine_enabled() -> bool:
+    return os.environ.get("BOT_ENGINE", "on").strip().lower() not in {"off", "0", "false", "no"}
+
+
+def _engine_poll_seconds() -> float:
+    try:
+        return max(2.0, float(os.environ.get("ENGINE_POLL_SECONDS", "15")))
+    except ValueError:
+        return 15.0
+
+
+async def _notify_telegram(title: str, body: str, level: str) -> None:
+    cfg = RUNTIME_STATE["telegram_config"]
+    await AlertDispatcher(telegram_token=cfg["bot_token"], telegram_chat_id=cfg["chat_id"]).send_alert(title, body, level)
+
+
+def _engine_wanted() -> bool:
+    keys = RUNTIME_STATE["bybit_demo_keys"]
+    return bool(
+        _engine_enabled()
+        and RUNTIME_STATE["demo_testing_active"]
+        and not RUNTIME_STATE["kill_switch_triggered"]
+        and keys["api_key"] and keys["api_secret"]
+    )
+
+
+def _new_engine() -> DemoEngine:
+    keys = RUNTIME_STATE["bybit_demo_keys"]
+    return DemoEngine(
+        BybitV5Adapter(api_key=keys["api_key"], api_secret=keys["api_secret"], is_demo=True),
+        RUNTIME_STATE,
+        persist=save_console_state,
+        record_trade=record_demo_trade,
+        notify=_notify_telegram,
+        poll_seconds=_engine_poll_seconds(),
+    )
+
+
+async def _stop_engine(timeout: float = 30.0) -> None:
+    """Ask the engine to stop and wait for it to finish its current step (so an order is
+    never abandoned half-way); cancel it only if it takes too long."""
+    global _ENGINE, _ENGINE_TASK
+    engine, task = _ENGINE, _ENGINE_TASK
+    _ENGINE, _ENGINE_TASK = None, None
+    if engine:
+        engine.request_stop()
+    if task and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except Exception:
+            task.cancel()
+
+
+async def sync_engine() -> None:
+    """Make the engine match the flags: running while demo testing is active, demo keys are
+    saved and the kill switch is off; stopped otherwise. Called after every change."""
+    global _ENGINE, _ENGINE_TASK, _ENGINE_KEYS
+    wanted = _engine_wanted()
+    running = _ENGINE_TASK is not None and not _ENGINE_TASK.done()
+    keys = (RUNTIME_STATE["bybit_demo_keys"]["api_key"], RUNTIME_STATE["bybit_demo_keys"]["api_secret"])
+    if running and (not wanted or keys != _ENGINE_KEYS):
+        await _stop_engine()
+        running = False
+    if wanted and not running:
+        _ENGINE = _new_engine()
+        _ENGINE_KEYS = keys
+        _ENGINE_TASK = asyncio.create_task(_ENGINE.run())
+        logger.info("Trading engine started (demo).")
+
+
+def _engine_summary() -> Dict[str, Any]:
+    running = _ENGINE_TASK is not None and not _ENGINE_TASK.done()
+    base: Dict[str, Any] = {"enabled": _engine_enabled(), "running": running}
+    if _ENGINE is not None and running:
+        base.update({k: _ENGINE.status.get(k) for k in ("text", "last_scan_utc", "last_decision", "last_error", "balance", "trend")})
+        base["consecutive_errors"] = _ENGINE.consecutive_errors
+        setup = RUNTIME_STATE["engine_state"].get("setup")
+        base["armed_setup"] = bool(setup)
+    return base
+
+
+def _engine_idle_reason() -> str:
+    if not _engine_enabled():
+        return "Trading engine is switched off (BOT_ENGINE=off)."
+    if RUNTIME_STATE["kill_switch_triggered"]:
+        return "Kill switch engaged: nothing is trading."
+    if not RUNTIME_STATE["demo_testing_active"]:
+        return "Radar idle. Click 'Start Demo Testing' to begin scanning."
+    keys = RUNTIME_STATE["bybit_demo_keys"]
+    if not (keys["api_key"] and keys["api_secret"]):
+        return "Demo testing is on, but no Bybit demo API keys are saved, so nothing can trade. Save your demo keys."
+    return "Starting the trading engine..."
+
+
+async def _close_open_position_for_kill() -> str:
+    """Kill switch: stop the engine's loop (so two tasks never close the same trade), then
+    close any open demo trade on Bybit. Returns a short result line."""
+    engine = _ENGINE
+    await _stop_engine()
+    if engine is None and RUNTIME_STATE["active_position"] and RUNTIME_STATE["bybit_demo_keys"]["api_key"]:
+        engine = _new_engine()
+    if engine is None:
+        return ""
+    try:
+        return await asyncio.wait_for(engine.emergency_close(), timeout=45.0)
+    except Exception as exc:
+        return f"Could not confirm the position was closed ({exc})."
 
 
 async def record_trade(
@@ -379,14 +505,16 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
     live_stats = STATS_TRACKER.get_stats("LIVE")
     recent_trades = STATS_TRACKER.get_recent_trades(10)
 
-    # Market Radar Telemetry (shows actively looking for setups)
-    is_scanning = RUNTIME_STATE["demo_testing_active"] or RUNTIME_STATE["live_trading_active"]
+    # Market Radar: what the trading engine is really doing right now
+    engine_info = _engine_summary()
+    is_scanning = bool(engine_info["running"])  # only true while the trading engine is really running
     radar_state = {
         "is_actively_scanning": is_scanning,
         "symbol_monitored": "BTCUSDT",
         "timeframes_tracked": ["1h (Macro Bias)", "15m (Liquidity Sweeps)", "2m (Entry Triggers)"],
-        "last_market_scan_utc": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "current_market_status": "Scanning order books & candles for Strategy 1 liquidity sweep setups..." if is_scanning else "Radar idle. Click 'Start Demo Testing' to begin scanning.",
+        "last_market_scan_utc": engine_info.get("last_scan_utc") or now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "current_market_status": (engine_info.get("text") if engine_info["running"] and engine_info.get("text") else _engine_idle_reason()),
+        "last_decision": engine_info.get("last_decision"),
     }
 
     return {
@@ -418,6 +546,7 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
             "chat_id": RUNTIME_STATE["telegram_config"]["chat_id"],
         },
         "persistence": _persistence_status(),
+        "engine": engine_info,
     }
 
 
@@ -433,7 +562,9 @@ async def save_api_keys(payload: APIKeyPayload, user: str = Depends(authenticate
         message = "Live keys stored successfully"
     else:
         raise HTTPException(status_code=400, detail="Invalid account_type. Must be 'demo' or 'live'")
-    return {"status": message, **await _save_secrets_and_describe()}
+    result = await _save_secrets_and_describe()
+    await sync_engine()  # demo testing waiting for keys starts trading as soon as they are saved
+    return {"status": message, **result}
 
 
 @app.post("/api/telegram")
@@ -481,14 +612,23 @@ async def start_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[st
     RUNTIME_STATE["is_bot_running"] = True
     RUNTIME_STATE["kill_switch_triggered"] = False
     await save_console_state()
-    return {"status": "SUCCESS", "message": "Demo Testing Started! Unrestricted trade cap active."}
+    await sync_engine()
+    message = "Demo Testing Started! Unrestricted trade cap active."
+    keys = RUNTIME_STATE["bybit_demo_keys"]
+    if not (keys["api_key"] and keys["api_secret"]):
+        message += " No Bybit demo API keys are saved yet, so nothing will trade until you save them."
+    return {"status": "SUCCESS", "message": message, "engine": _engine_summary()}
 
 
 @app.post("/api/demo/stop")
 async def stop_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     RUNTIME_STATE["demo_testing_active"] = False
     await save_console_state()
-    return {"status": "PAUSED", "message": "Demo Testing Paused."}
+    await sync_engine()
+    message = "Demo Testing Paused."
+    if RUNTIME_STATE["active_position"]:
+        message += " An open trade stays protected by its stop and take-profit orders on Bybit and is checked again when you resume."
+    return {"status": "PAUSED", "message": message}
 
 
 @app.post("/api/live/start")
@@ -514,7 +654,10 @@ async def start_live_trading(user: str = Depends(authenticate_admin)) -> Dict[st
     RUNTIME_STATE["is_bot_running"] = True
     RUNTIME_STATE["kill_switch_triggered"] = False
     await save_console_state()
-    return {"status": "SUCCESS", "message": "Live Trading Active! Enforcing 2 trades/day cap."}
+    return {
+        "status": "SUCCESS",
+        "message": "Live flag set and 2 trades/day cap recorded. Note: automatic live order placement is not built yet, so nothing trades live.",
+    }
 
 
 @app.post("/api/live/stop")
@@ -526,10 +669,15 @@ async def stop_live_trading(user: str = Depends(authenticate_admin)) -> Dict[str
 
 @app.post("/api/emergency/kill")
 async def trigger_emergency_kill(user: str = Depends(authenticate_admin)) -> Dict[str, str]:
+    # Stop new trades first, then close whatever is open on Bybit.
     RUNTIME_STATE["is_bot_running"] = False
     RUNTIME_STATE["demo_testing_active"] = False
     RUNTIME_STATE["live_trading_active"] = False
     RUNTIME_STATE["kill_switch_triggered"] = True
-    RUNTIME_STATE["active_position"] = None
     await save_console_state()
-    return {"status": "HALTED", "message": "Kill switch engaged. System halted and new orders blocked."}
+    closing = await _close_open_position_for_kill()
+    await save_console_state()
+    message = "Kill switch engaged. System halted and new orders blocked."
+    if closing:
+        message += " " + closing
+    return {"status": "HALTED", "message": message}

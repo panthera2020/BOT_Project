@@ -31,6 +31,7 @@ def fresh_state():
         "kill_switch_triggered": False,
         "active_position": None,
         "telegram_config": {"bot_token": "", "chat_id": ""},
+        "engine_state": {},
     }
 
 
@@ -41,6 +42,7 @@ def busy_state():
         demo_run_start_time=NOW - timedelta(hours=5),
         clean_demo_trade_count=7,
         active_position={"symbol": "BTCUSDT", "side": "Buy", "qty": 0.002},
+        engine_state={"day": "2026-10-18", "day_start_capital": 1000.0, "last_15m_eval_ts": 123, "setup": None},
     )
     s["bybit_demo_keys"] = {"api_key": "DK", "api_secret": "DS"}
     s["bybit_live_keys"] = {"api_key": "LK", "api_secret": "LS"}

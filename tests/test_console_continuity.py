@@ -224,7 +224,9 @@ async def test_demo_testing_resumes_by_itself_and_says_so():
         await restart()
         status = (await client.get("/api/status", auth=AUTH)).json()
     assert status["demo_testing_active"] is True
-    assert status["market_radar"]["is_actively_scanning"] is True
+    # the tests run with the trading engine switched off, so the radar must say it is NOT scanning
+    assert status["market_radar"]["is_actively_scanning"] is False
+    assert "switched off" in status["market_radar"]["current_market_status"]
     assert any("Demo testing resumed" in r for r in status["persistence"]["resumed"])
 
 

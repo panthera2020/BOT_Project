@@ -9,8 +9,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def engine_off_by_default(monkeypatch):
+    """The web tests use fake API keys; the trading engine must not try to reach Bybit."""
+    monkeypatch.setenv("BOT_ENGINE", "off")
+
+
+@pytest.fixture(autouse=True)
 def fresh_console_gate_state():
-    from src.web.app import RUNTIME_STATE
+    from src.web.app import RUNTIME_STATE, STATS_TRACKER
 
     RUNTIME_STATE["demo_run_start_time"] = None
     RUNTIME_STATE["clean_demo_trade_count"] = 0
@@ -20,4 +26,7 @@ def fresh_console_gate_state():
     RUNTIME_STATE["kill_switch_triggered"] = False
     RUNTIME_STATE["is_bot_running"] = True
     RUNTIME_STATE["current_mode"] = "DEMO"
+    RUNTIME_STATE["active_position"] = None
+    RUNTIME_STATE["engine_state"] = {}
+    STATS_TRACKER.restore_trades([])
     yield

@@ -29,6 +29,7 @@ def snapshot_plain(state: Dict[str, Any], now: Optional[datetime] = None) -> Dic
         "demo_run_start_time": started.isoformat() if started else None,
         "clean_demo_trade_count": int(state["clean_demo_trade_count"]),
         "active_position": state.get("active_position"),
+        "engine_state": state.get("engine_state") or {},
         "telegram_chat_id": state["telegram_config"]["chat_id"],
     }
 
@@ -94,6 +95,13 @@ def restore_plain(state: Dict[str, Any], data: Any) -> List[str]:
             state["active_position"] = position
         else:
             problems.append("active_position is invalid; ignored")
+
+    if "engine_state" in data:
+        engine_state = data["engine_state"]
+        if isinstance(engine_state, dict):
+            state["engine_state"] = engine_state
+        else:
+            problems.append("engine_state is invalid; ignored")
 
     chat_id = data.get("telegram_chat_id")
     if isinstance(chat_id, str):
@@ -162,7 +170,7 @@ def apply_resume_policy(
 
     if state["active_position"]:
         notes.append(
-            "An open position was restored from saved state. It must be checked against "
-            "Bybit before the engine acts on it."
+            "An open position was restored from saved state. When demo testing runs, the "
+            "engine checks it against Bybit before doing anything else."
         )
     return resumed, notes

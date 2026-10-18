@@ -587,13 +587,21 @@
             pulse.className = "pulse-dot pulse-active";
             statusText.innerText = "ACTIVELY SCANNING ORDER BOOK & CANDLES";
             statusText.style.color = "#34d399";
+          } else if (data.demo_testing_active || data.live_trading_active) {
+            pulse.className = "pulse-dot pulse-idle";
+            statusText.innerText = "NOT SCANNING (see message below)";
+            statusText.style.color = "#fbbf24";
           } else {
             pulse.className = "pulse-dot pulse-idle";
             statusText.innerText = "RADAR IDLE (Awaiting activation)";
             statusText.style.color = "#9ca3af";
           }
           if (radar.last_market_scan_utc) scanTime.innerText = radar.last_market_scan_utc;
-          if (radar.current_market_status) details.innerText = radar.current_market_status;
+          if (radar.current_market_status) {
+            details.innerText = radar.current_market_status +
+              (radar.last_decision ? "\nLast decision: " + radar.last_decision : "");
+            details.style.whiteSpace = "pre-wrap";
+          }
         }
 
         renderPersistence(data.persistence);
