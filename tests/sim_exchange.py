@@ -90,6 +90,18 @@ def default_markets(sweep_low: float = 100700.0, climb_start: float = 101900.0, 
     return {"15": c15[::-1], "60": c1h[::-1], "1": c1[::-1]}
 
 
+def mirror(markets: Dict[str, List[List[str]]], k: float = 204000.0) -> Dict[str, List[List[str]]]:
+    """Flip every price (p -> k - p): a long setup in an up-trend becomes the exact short
+    setup in a down-trend (highs and lows swap, bullish candles become bearish)."""
+    out = {}
+    for interval, rows in markets.items():
+        out[interval] = [
+            [r[0], str(k - float(r[1])), str(k - float(r[3])), str(k - float(r[2])), str(k - float(r[4])), r[5], r[6]]
+            for r in rows
+        ]
+    return out
+
+
 class SimExchange:
     def __init__(self, balance: float = 1000.0, markets: Optional[Dict[str, List[List[str]]]] = None, clock: Optional[Clock] = None):
         self.balance = balance
@@ -115,9 +127,10 @@ class SimExchange:
     def _close(self, qty: float, price: float) -> None:
         pos = self.position
         qty = min(qty, pos["size"])
+        sign = 1 if pos["side"] == "Buy" else -1
         self.closed.append({
             "symbol": "BTCUSDT", "closedSize": str(qty), "avgEntryPrice": str(pos["avg"]),
-            "avgExitPrice": str(price), "closedPnl": str((price - pos["avg"]) * qty),
+            "avgExitPrice": str(price), "closedPnl": str(sign * (price - pos["avg"]) * qty),
             "updatedTime": str(int(self.clock.now().timestamp() * 1000)),
         })
         pos["size"] = round(pos["size"] - qty, 8)
@@ -128,10 +141,16 @@ class SimExchange:
     def move_price(self, price: float) -> None:
         """Move the market; fill the exchange-side stop and take-profit orders like Bybit would."""
         self.price = price
-        if self.position and self.position.get("stop") and price <= self.position["stop"]:
-            self._close(self.position["size"], self.position["stop"])
+        pos = self.position
+        if pos and pos.get("stop"):
+            hit = price <= pos["stop"] if pos["side"] == "Buy" else price >= pos["stop"]
+            if hit:
+                self._close(pos["size"], pos["stop"])
         for order in list(self.orders):
-            if self.position and order["price"] <= price:
+            if not self.position:
+                break
+            long_tp = self.position["side"] == "Buy"
+            if (long_tp and price >= order["price"]) or (not long_tp and price <= order["price"]):
                 self.orders.remove(order)
                 self._close(order["qty"], order["price"])
 
@@ -148,7 +167,7 @@ class SimExchange:
         self._check()
         if not self.position:
             return None
-        return {"size": str(self.position["size"]), "avgPrice": str(self.position["avg"]),
+        return {"side": self.position["side"], "size": str(self.position["size"]), "avgPrice": str(self.position["avg"]),
                 "markPrice": str(self.price), "stopLoss": str(self.position.get("stop") or "")}
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
@@ -166,10 +185,10 @@ class SimExchange:
             return {"retCode": 0, "result": {"orderId": f"o{len(self.orders)}"}}
         if self.reject_market:
             return {"retCode": 10001, "retMsg": "simulated rejection"}
-        if req["side"] == "Buy":
+        if self.position is None and not req.get("reduce_only"):
             stop = None if self.ignore_stop_on_order else req.get("stop_loss")
-            self.position = {"size": req["qty"], "avg": self.price, "stop": stop}
-        elif self.position:
+            self.position = {"side": req["side"], "size": req["qty"], "avg": self.price, "stop": stop}
+        elif self.position and req["side"] != self.position["side"]:
             self._close(req["qty"], self.price)
         return {"retCode": 0, "result": {"orderId": "m"}}
 

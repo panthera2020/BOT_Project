@@ -66,3 +66,25 @@ def test_the_test_market_really_contains_the_setup():
     assert swing is not None and abs(swing - 101200) < 10
     assert m.detect_trend(c15) == TrendDirection.UP
     assert m.detect_trend(m.drop_forming(m.parse_candles(mk["60"]))) == TrendDirection.UP
+
+
+def test_authorized_direction_follows_the_prd_trend_table():
+    U, D, R = TrendDirection.UP, TrendDirection.DOWN, TrendDirection.RANGE
+    # (1h, 15m) -> side: Up/Up long, Down/Down short, Up/Down short (counter), Down/Up long (counter), any Range -> none
+    assert m.authorized_direction(U, U) == "Buy"
+    assert m.authorized_direction(D, D) == "Sell"
+    assert m.authorized_direction(U, D) == "Sell"
+    assert m.authorized_direction(D, U) == "Buy"
+    for other in (U, D, R):
+        assert m.authorized_direction(R, other) is None
+        assert m.authorized_direction(other, R) is None
+
+
+def test_unswept_swing_high_mirrors_the_swing_low_rule():
+    pivots = [100, 110, 102, 112, 104, 108]
+    cs = [Candle(int(x[0]), x[1], x[2], x[3], x[4]) for x in zigzag(0, 900_000, pivots, per_leg=4, wick=0.5)]
+    assert abs(m.latest_unswept_swing_high(cs) - 112.5) < 1
+    # candles that exceed the latest high without forming a confirmed swing make it "swept"; the older
+    # high (110.5) was already exceeded by it, so there is no unswept swing high left
+    exceed = cs + [c(10**9, 107, 113, 106, 108), c(10**9 + 1, 108, 113.5, 107, 109), c(10**9 + 2, 109, 113.2, 108, 110)]
+    assert m.latest_unswept_swing_high(exceed) is None

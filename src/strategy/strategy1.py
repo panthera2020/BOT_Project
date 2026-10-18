@@ -120,3 +120,46 @@ class Strategy1StateMachine:
 
         entry_price = last_three[-1].close
         return True, entry_price, "TRIGGER_CONFIRMED"
+
+    # ---- short side: exact mirror of the long rules, for the PRD's "Short Only" rows ----
+
+    def evaluate_15m_sweep_short(
+        self,
+        swing_high: float,
+        candle_15m: Candle,
+    ) -> tuple[bool, str]:
+        """Mirror of evaluate_15m_sweep for a short setup:
+        - High must trade strictly above swing_high
+        - Close must be strictly back below swing_high
+        - A close above swing_high is a structural breakout: setup cancelled
+        """
+        if candle_15m.high <= swing_high:
+            return False, "NO_SWEEP"
+
+        if candle_15m.close > swing_high:
+            return False, "SWEEP_FAILED_CLOSE_ABOVE_SWING"
+
+        return True, "SWEEP_CONFIRMED"
+
+    def check_2m_micro_trigger_short(
+        self,
+        candles_2m_after_sweep: List[Candle],
+        sweep_high_extreme: float,
+    ) -> tuple[bool, Optional[float], str]:
+        """Mirror of check_2m_micro_trigger: any 2m high above the sweep high invalidates the
+        setup; the trigger is three consecutive bearish 2m candles."""
+        if not candles_2m_after_sweep:
+            return False, None, "AWAITING_2M_CANDLES"
+
+        for c in candles_2m_after_sweep:
+            if c.high > sweep_high_extreme:
+                return False, None, "INVALIDATED_ABOVE_SWEEP_EXTREME"
+
+        if len(candles_2m_after_sweep) < 3:
+            return False, None, "INSUFFICIENT_2M_CANDLES"
+
+        last_three = candles_2m_after_sweep[-3:]
+        if not all(c.is_bearish for c in last_three):
+            return False, None, "LESS_THAN_THREE_CONSECUTIVE_BEARISH"
+
+        return True, last_three[-1].close, "TRIGGER_CONFIRMED"

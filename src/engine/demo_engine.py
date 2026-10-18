@@ -6,11 +6,14 @@ the open trade, and records each closed trade (which is what unlocks live tradin
 Flow, one pass ("tick") every few seconds:
   open trade?  -> check it against Bybit, apply the breakeven / early-exit rules, and when
                   Bybit shows it flat, record the result.
-  flat?        -> watch for a closed 15m candle that sweeps the last swing low and closes back
-                  above it, then for three bullish 2m candles that never trade below the
-                  sweep low; then check trend / risk schedule / sizing / net RR, and enter.
+  flat?        -> watch for a closed 15m candle that sweeps the last swing low (long) or swing
+                  high (short) and closes back inside, then for three 2m candles in the trade
+                  direction that never break the sweep extreme; then check trend / risk
+                  schedule / sizing / net RR, and enter.
 
-The strategy is long-only, as written in the PRD: it buys after a swing-low sweep.
+Both directions are traded, following the PRD's trend table: the 15m trend picks the side
+(Up -> long after a swing-low sweep, Down -> short after a swing-high sweep, mirrored rules),
+the 1h trend only decides full or half risk, and a Range on either timeframe stands down.
 Everything the engine must remember across a restart (the open trade and its progress,
 the evaluated candle, the armed setup, the day's starting capital) lives in the shared
 state dict and is saved through `persist`, so a restart carries on where it stopped.
@@ -24,7 +27,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.core.daily_cap import get_trading_day_id
 from src.core.exit_policy import ExitActionType, ExitPolicyMonitor, TradeExitPlan, build_trade_exit_plan
-from src.core.models import BTCUSDT_CONFIG, OrderSide, PairConfig
+from src.core.models import BTCUSDT_CONFIG, OrderSide, PairConfig, TrendDirection
 from src.core.net_rr_gate import calculate_net_rr
 from src.core.position_sizing import calculate_position_size
 from src.core.risk_schedule import evaluate_risk_schedule
@@ -40,6 +43,10 @@ ALERT_AFTER_ERRORS = 5
 
 def _ms(now: datetime) -> int:
     return int(now.timestamp() * 1000)
+
+
+def _opposite(side: str) -> str:
+    return OrderSide.SELL.value if side == OrderSide.BUY.value else OrderSide.BUY.value
 
 
 class DemoEngine:
@@ -161,23 +168,7 @@ class DemoEngine:
         latest = c15[-1]
 
         if latest.timestamp > self.es["last_15m_eval_ts"]:
-            swing = market.latest_unswept_swing_low(c15[:-1][-60:])
-            self.es["last_15m_eval_ts"] = latest.timestamp
-            if swing is None:
-                self._decide("15m candle closed: no swing low to sweep")
-            else:
-                swept, why = self.strategy.evaluate_15m_sweep(swing, latest)
-                if swept:
-                    self.es["setup"] = {
-                        "sweep_low": latest.low, "swing_low": swing,
-                        "sweep_end_ms": latest.timestamp + 15 * 60_000,
-                        "expires_ms": latest.timestamp + 15 * 60_000 + self.setup_window_ms,
-                    }
-                    self._decide(f"15m sweep of {swing:.1f} confirmed (low {latest.low:.1f}); waiting for 3 bullish 2m candles")
-                    await self._alert("SWEEP_DETECTED", f"{self.symbol}: 15m sweep of {swing:.1f}, low {latest.low:.1f}. Waiting for the 2m trigger.", "INFO")
-                else:
-                    self._decide(f"15m candle closed: {why} (swing low {swing:.1f})")
-            await self.persist()
+            await self._evaluate_new_15m_candle(c15, latest)
 
         setup = self.es.get("setup")
         if not setup:
@@ -191,23 +182,80 @@ class DemoEngine:
             await self.persist()
             return
 
+        side = setup.get("side", OrderSide.BUY.value)  # setups saved by v1.7 had no side: they were long
+        extreme = setup.get("sweep_extreme", setup.get("sweep_low"))
         c2 = market.aggregate_2m(market.drop_forming(market.parse_candles(await self.exchange.get_candles(self.symbol, "1", 200))))
         after = [c for c in c2 if c.timestamp >= setup["sweep_end_ms"]]
-        triggered, price, why = self.strategy.check_2m_micro_trigger(after, setup["sweep_low"])
-        if why == "INVALIDATED_BELOW_SWEEP_EXTREME":
+        if side == OrderSide.BUY.value:
+            triggered, price, why = self.strategy.check_2m_micro_trigger(after, extreme)
+        else:
+            triggered, price, why = self.strategy.check_2m_micro_trigger_short(after, extreme)
+        if why.startswith("INVALIDATED"):
             self.es["setup"] = None
-            self._decide("setup invalidated: price traded below the sweep low")
+            self._decide(f"setup invalidated: price broke the sweep {'low' if side == OrderSide.BUY.value else 'high'}")
             await self.persist()
             return
         if not triggered:
-            self.status["text"] = f"Sweep detected; waiting for 3 bullish 2m candles ({why})."
+            word = "bullish" if side == OrderSide.BUY.value else "bearish"
+            self.status["text"] = f"{'Long' if side == OrderSide.BUY.value else 'Short'} sweep detected; waiting for 3 {word} 2m candles ({why})."
             return
-        await self._try_enter(price, setup, equity, c15, now)
+        await self._try_enter(price, setup, side, extreme, equity, c15, now)
+
+    async def _evaluate_new_15m_candle(self, c15: list, latest: Any) -> None:
+        """Look at a newly closed 15m candle once: pick the side from the trend table, then
+        check whether it swept the last swing low (long) or swing high (short)."""
+        self.es["last_15m_eval_ts"] = latest.timestamp
+        c1h = market.drop_forming(market.parse_candles(await self.exchange.get_candles(self.symbol, "60", 100)))
+        macro, micro = market.detect_trend(c1h), market.detect_trend(c15)
+        self.status["trend"] = f"1h {macro.value} / 15m {micro.value}"
+        side = market.authorized_direction(macro, micro)
+        history = c15[:-1][-60:]
+        if side is None:
+            self.es["setup"] = None
+            self._decide(f"15m candle closed: trend {self.status['trend']} -> stand down (range)")
+        elif side == OrderSide.BUY.value:
+            level = market.latest_unswept_swing_low(history)
+            if level is None:
+                self._decide("15m candle closed: no swing low to sweep")
+            else:
+                swept, why = self.strategy.evaluate_15m_sweep(level, latest)
+                if swept:
+                    await self._arm(side, level, latest, latest.low)
+                else:
+                    self._decide(f"15m candle closed: {why} (long side, swing low {level:.1f})")
+        else:
+            level = market.latest_unswept_swing_high(history)
+            if level is None:
+                self._decide("15m candle closed: no swing high to sweep")
+            else:
+                swept, why = self.strategy.evaluate_15m_sweep_short(level, latest)
+                if swept:
+                    await self._arm(side, level, latest, latest.high)
+                else:
+                    self._decide(f"15m candle closed: {why} (short side, swing high {level:.1f})")
+        await self.persist()
+
+    async def _arm(self, side: str, level: float, candle: Any, extreme: float) -> None:
+        end_ms = candle.timestamp + 15 * 60_000
+        self.es["setup"] = {
+            "side": side, "sweep_extreme": extreme, "swing_level": level,
+            "sweep_end_ms": end_ms, "expires_ms": end_ms + self.setup_window_ms,
+        }
+        word = "bullish" if side == OrderSide.BUY.value else "bearish"
+        kind = "low" if side == OrderSide.BUY.value else "high"
+        self._decide(f"15m sweep of swing {kind} {level:.1f} confirmed (extreme {extreme:.1f}); waiting for 3 {word} 2m candles [{self.status['trend']}]")
+        await self._alert(
+            "SWEEP_DETECTED",
+            f"{self.symbol}: {'long' if side == OrderSide.BUY.value else 'short'} setup. 15m sweep of {level:.1f}, extreme {extreme:.1f}. Waiting for the 2m trigger.",
+            "INFO",
+        )
 
     # ------------------------------------------------------------------ entry
-    async def _try_enter(self, trigger_price: float, setup: Dict[str, Any], equity: float, c15: list, now: datetime) -> None:
+    async def _try_enter(self, trigger_price: float, setup: Dict[str, Any], side: str, extreme: float, equity: float, c15: list, now: datetime) -> None:
         self.es["setup"] = None  # a trigger is used up whether or not the trade passes the gates
         await self.persist()
+        is_long = side == OrderSide.BUY.value
+        word = "long" if is_long else "short"
 
         c1h = market.drop_forming(market.parse_candles(await self.exchange.get_candles(self.symbol, "60", 100)))
         macro, micro = market.detect_trend(c1h), market.detect_trend(c15)
@@ -217,16 +265,23 @@ class DemoEngine:
         if not schedule.is_trading_enabled:
             self._decide(f"trigger skipped: {schedule.rejection_reason} ({self.status['trend']})")
             return
+        allowed = market.authorized_direction(macro, micro)
+        if allowed != side:
+            self._decide(f"trigger skipped: the trend table now allows {'long' if allowed == 'Buy' else 'short' if allowed else 'nothing'}, not {word} ({self.status['trend']})")
+            return
 
         entry = trigger_price
-        stop = market.round_to_tick(setup["sweep_low"] - self.strategy.stop_buffer, self.config.tick_size)
-        if stop >= entry:
-            self._decide("trigger skipped: stop is not below entry")
+        buffer = self.strategy.stop_buffer
+        stop = market.round_to_tick(extreme - buffer if is_long else extreme + buffer, self.config.tick_size)
+        if (is_long and stop >= entry) or (not is_long and stop <= entry):
+            self._decide(f"trigger skipped: stop is on the wrong side of entry ({word})")
             return
         sizing = calculate_position_size(schedule.effective_r, entry, stop, self.config)
         if not sizing.is_valid:
             self._decide(f"trigger skipped: {sizing.rejection_reason}")
             return
+        # calculate_net_rr is written for a long (its exit fee is on entry + 3d); for a short the
+        # exit fee is on entry - 3d, a hair smaller, so the gate is very slightly conservative.
         rr = calculate_net_rr(sizing.nominal_distance_d, sizing.loss_per_unit_l, entry)
         if not rr.passes_gate:
             self._decide(f"trigger skipped: {rr.rejection_reason}")
@@ -240,12 +295,12 @@ class DemoEngine:
             self._decide("trigger skipped: Bybit refused the leverage change")
             return
         reply = await self.exchange.place_order({
-            "symbol": self.symbol, "side": OrderSide.BUY.value, "qty": sizing.qty,
+            "symbol": self.symbol, "side": side, "qty": sizing.qty,
             "order_type": "Market", "stop_loss": stop,
         })
         if reply.get("retCode") != 0:
             self._decide(f"entry rejected by Bybit: {reply.get('retMsg') or reply}")
-            await self._alert("ENTRY_REJECTED", f"{self.symbol} {sizing.qty}: {reply.get('retMsg') or reply}", "WARNING")
+            await self._alert("ENTRY_REJECTED", f"{self.symbol} {word} {sizing.qty}: {reply.get('retMsg') or reply}", "WARNING")
             return
 
         live = None
@@ -261,13 +316,16 @@ class DemoEngine:
             return
 
         filled_entry, filled_qty = float(live["avgPrice"]), float(live["size"])
-        plan = build_trade_exit_plan(OrderSide.BUY, filled_entry, stop, filled_qty, self.config)
+        order_side = OrderSide.BUY if is_long else OrderSide.SELL
+        plan = build_trade_exit_plan(order_side, filled_entry, stop, filled_qty, self.config)
+        tick = self.config.tick_size
         record = {
-            "mode": "DEMO", "symbol": self.symbol, "side": OrderSide.BUY.value, "qty": filled_qty,
+            "mode": "DEMO", "symbol": self.symbol, "side": side, "qty": filled_qty,
             "entry_price": filled_entry, "stop_price": stop, "initial_stop_price": stop,
-            "tp1_price": plan.tp1_price, "tp2_price": plan.tp2_price,
+            # Bybit rejects prices that are not on the tick grid, so the plan's 2-decimal prices are rounded to it
+            "tp1_price": market.round_to_tick(plan.tp1_price, tick), "tp2_price": market.round_to_tick(plan.tp2_price, tick),
             "tp1_lots": plan.tp1_lots, "tp2_lots": plan.tp2_lots, "is_single_exit": plan.is_single_exit,
-            "be_price": plan.breakeven_price, "breakeven_active": False, "early_armed": False,
+            "be_price": market.round_to_tick(plan.breakeven_price, tick), "breakeven_active": False, "early_armed": False,
             "highest_r": 0.0, "opened_ms": _ms(now) - 5000, "opened_utc": now.isoformat(),
             "effective_r": schedule.effective_r, "net_rr": rr.net_rr, "leverage": leverage,
             "trend": self.status["trend"], "unclean": False, "close_reason": None, "finalize_attempts": 0,
@@ -276,7 +334,7 @@ class DemoEngine:
         await self.persist()  # saved BEFORE the take-profits go out, so a crash cannot lose track of the trade
 
         problem = None
-        if filled_entry <= stop:
+        if (is_long and filled_entry <= stop) or (not is_long and filled_entry >= stop):
             problem = "price gapped through the stop"
         else:
             if not (live.get("stopLoss") and float(live["stopLoss"]) > 0):
@@ -291,10 +349,10 @@ class DemoEngine:
             await self._close_at_market(record, "SAFETY_CLOSE")
             return
 
-        self._decide(f"ENTERED long {filled_qty} @ {filled_entry:.1f}, stop {stop:.1f}, TP1 {plan.tp1_price:.1f}, TP2 {plan.tp2_price:.1f}, net RR {rr.net_rr}")
+        self._decide(f"ENTERED {word} {filled_qty} @ {filled_entry:.1f}, stop {stop:.1f}, TP1 {record['tp1_price']:.1f}, TP2 {record['tp2_price']:.1f}, net RR {rr.net_rr}")
         await self._alert(
             "TRADE_OPENED",
-            f"{self.symbol} LONG {filled_qty} @ {filled_entry:.1f}\nStop {stop:.1f} | TP1 {plan.tp1_price:.1f} | TP2 {plan.tp2_price:.1f}\n"
+            f"{self.symbol} {word.upper()} {filled_qty} @ {filled_entry:.1f}\nStop {stop:.1f} | TP1 {record['tp1_price']:.1f} | TP2 {record['tp2_price']:.1f}\n"
             f"Risk ${schedule.effective_r:.2f} | net RR {rr.net_rr} | {leverage}x | {self.status['trend']}",
             "INFO",
         )
@@ -306,7 +364,7 @@ class DemoEngine:
             legs.append((record["tp2_lots"], record["tp2_price"], "TP2"))
         for qty, price, name in legs:
             reply = await self.exchange.place_order({
-                "symbol": self.symbol, "side": OrderSide.SELL.value, "qty": qty,
+                "symbol": self.symbol, "side": _opposite(record["side"]), "qty": qty,
                 "order_type": "Limit", "price": price, "reduce_only": True,
             })
             if reply.get("retCode") != 0:
@@ -320,7 +378,7 @@ class DemoEngine:
             tp1_price=record["tp1_price"], tp2_price=record["tp2_price"],
             initial_stop_price=record["initial_stop_price"], breakeven_price=record["be_price"],
         )
-        monitor = ExitPolicyMonitor(OrderSide.BUY, record["entry_price"], record["initial_stop_price"], plan)
+        monitor = ExitPolicyMonitor(OrderSide(record["side"]), record["entry_price"], record["initial_stop_price"], plan)
         monitor.highest_r = record["highest_r"]
         monitor.is_early_exit_armed = record["early_armed"]
         monitor.is_breakeven_active = record["breakeven_active"]
@@ -332,7 +390,7 @@ class DemoEngine:
             await self._finalize(record)
             return
 
-        self.status["text"] = f"In a trade: long {live.get('size')} @ {record['entry_price']:.1f}."
+        self.status["text"] = f"In a trade: {'long' if record['side'] == 'Buy' else 'short'} {live.get('size')} @ {record['entry_price']:.1f}."
         if record.get("close_reason"):
             return  # a market close is already on its way
         price = float(live.get("markPrice") or 0.0)
@@ -367,7 +425,7 @@ class DemoEngine:
         live = await self.exchange.get_position(self.symbol)
         if live:
             reply = await self.exchange.place_order({
-                "symbol": self.symbol, "side": OrderSide.SELL.value, "qty": float(live["size"]),
+                "symbol": self.symbol, "side": _opposite(record["side"]), "qty": float(live["size"]),
                 "order_type": "Market", "reduce_only": True,
             })
             if reply.get("retCode") != 0:
@@ -393,8 +451,8 @@ class DemoEngine:
         if record:
             record["unclean"] = True
         reply = await self.exchange.place_order({
-            "symbol": self.symbol, "side": OrderSide.SELL.value, "qty": float(live["size"]),
-            "order_type": "Market", "reduce_only": True,
+            "symbol": self.symbol, "side": _opposite(live.get("side") or (record or {}).get("side") or OrderSide.BUY.value),
+            "qty": float(live["size"]), "order_type": "Market", "reduce_only": True,
         })
         if reply.get("retCode") != 0:
             return f"Bybit refused the close order ({reply.get('retMsg') or reply}). The stop on Bybit is still in place."
@@ -449,7 +507,7 @@ class DemoEngine:
         self._decide(f"trade closed: {pnl:+.2f} USD ({r_multiple:+.2f}R){'' if clean else ' [not counted as clean]'}")
         await self._alert(
             "TRADE_CLOSED",
-            f"{self.symbol} LONG closed {pnl:+.2f} USD ({r_multiple:+.2f}R)\nEntry {record['entry_price']:.1f} -> exit {exit_price:.1f}"
+            f"{self.symbol} {'LONG' if record['side'] == 'Buy' else 'SHORT'} closed {pnl:+.2f} USD ({r_multiple:+.2f}R)\nEntry {record['entry_price']:.1f} -> exit {exit_price:.1f}"
             f"{'' if clean else chr(10) + 'Not counted toward the 20-trade gate.'}",
             "INFO" if pnl >= 0 else "WARNING",
         )

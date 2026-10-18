@@ -84,6 +84,24 @@ def latest_unswept_swing_low(history: List[Candle]) -> Optional[float]:
     return None
 
 
+def latest_unswept_swing_high(history: List[Candle]) -> Optional[float]:
+    """Most recent confirmed swing high in `history` that no later candle has exceeded."""
+    for i in reversed(swing_high_indexes(history)):
+        level = history[i].high
+        if all(c.high <= level for c in history[i + 1:]):
+            return level
+    return None
+
+
+def authorized_direction(macro: TrendDirection, micro: TrendDirection) -> Optional[str]:
+    """The PRD's trend table: the 15m trend picks the side (long when 15m is Up, short when
+    Down); the 1h trend only decides full or half risk. A Range on either timeframe means no
+    trade. Returns "Buy", "Sell" or None."""
+    if macro == TrendDirection.RANGE or micro == TrendDirection.RANGE:
+        return None
+    return "Buy" if micro == TrendDirection.UP else "Sell"
+
+
 def detect_trend(candles: List[Candle]) -> TrendDirection:
     highs = [candles[i].high for i in swing_high_indexes(candles)]
     lows = [candles[i].low for i in swing_low_indexes(candles)]
