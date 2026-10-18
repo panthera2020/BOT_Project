@@ -322,6 +322,16 @@
           <button class="btn btn-stop" style="white-space: nowrap;" onclick="testTelegramAlert()">Send Test Ping</button>
         </div>
       </div>
+
+      <!-- Saved State: what is saved on this device and what came back after the last start -->
+      <div class="card" id="persistCard" style="border-left: 4px solid #6b7280;">
+        <h3>💾 Saved State</h3>
+        <div id="persistState" style="font-size: 13px; font-weight: 600; margin-bottom: 6px;">Checking...</div>
+        <div id="persistSecrets" style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;"></div>
+        <div style="font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 700; margin-bottom: 4px;">Restored at last start</div>
+        <ul id="persistResumed" style="font-size: 12px; margin: 0 0 8px 16px; padding: 0;"></ul>
+        <ul id="persistNotes" style="font-size: 12px; margin: 0 0 0 16px; padding: 0; color: #fbbf24;"></ul>
+      </div>
     </div>
 
     <!-- Recent Trades Table -->
@@ -467,6 +477,42 @@
       setTimeout(() => { t.style.display = "none"; }, 3500);
     }
 
+    function fillList(id, items, emptyText) {
+      const ul = document.getElementById(id);
+      ul.textContent = "";
+      const lines = (items && items.length) ? items : (emptyText ? [emptyText] : []);
+      lines.forEach(text => {
+        const li = document.createElement("li");
+        li.textContent = text;  // textContent, never innerHTML: these strings come from the server
+        ul.appendChild(li);
+      });
+    }
+
+    function renderPersistence(p) {
+      if (!p) return;
+      const stateEl = document.getElementById("persistState");
+      const card = document.getElementById("persistCard");
+      if (p.enabled) {
+        stateEl.textContent = p.last_saved_utc ? "Saving ON \u2014 last saved " + p.last_saved_utc : "Saving ON \u2014 nothing saved yet";
+        stateEl.style.color = "#34d399";
+        card.style.borderLeftColor = "#34d399";
+      } else {
+        stateEl.textContent = "Saving OFF \u2014 a restart starts from scratch";
+        stateEl.style.color = "#f87171";
+        card.style.borderLeftColor = "#f87171";
+      }
+      const secretsEl = document.getElementById("persistSecrets");
+      if (!p.enabled) {
+        secretsEl.textContent = "Set DATABASE_URL to turn saving on.";
+      } else if (p.secrets_saved_encrypted) {
+        secretsEl.textContent = "API keys and the Telegram token are saved encrypted.";
+      } else {
+        secretsEl.textContent = p.secrets_note || "API keys and the Telegram token are not saved.";
+      }
+      fillList("persistResumed", p.resumed, "Nothing needed restoring (fresh start).");
+      fillList("persistNotes", p.notes, "");
+    }
+
     async function fetchStatus() {
       if (!getAuth()) { showLogin(); return; }
       try {
@@ -550,6 +596,8 @@
           if (radar.current_market_status) details.innerText = radar.current_market_status;
         }
 
+        renderPersistence(data.persistence);
+
         // Render Recent Trades
         if (data.recent_trades && data.recent_trades.length > 0) {
           const tbody = document.getElementById("tradeHistoryBody");
@@ -619,7 +667,7 @@
         });
         const d = await res.json();
         if (res.ok) {
-          showToast(d.status || "Keys saved successfully!");
+          showToast(d.note ? (d.status || "Keys stored") + " (" + d.note + ")" : (d.status || "Keys saved successfully!"), !!d.note);
         } else {
           showToast(d.detail || "Error saving keys", true);
         }
@@ -643,7 +691,7 @@
         });
         const d = await res.json();
         if (res.ok) {
-          showToast(d.message || "Telegram settings saved!");
+          showToast(d.note ? (d.message || "Telegram saved") + " (" + d.note + ")" : (d.message || "Telegram settings saved!"), !!d.note);
         } else {
           showToast(d.detail || "Error saving Telegram settings", true);
         }

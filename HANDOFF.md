@@ -1,4 +1,4 @@
-# Handoff and Status (v1.5, 2026-10-17)
+# Handoff and Status (v1.6, 2026-10-18)
 
 **Update this file every time the work changes, and prepare a fresh copy whenever usage is about to run out.**
 
@@ -10,7 +10,9 @@
 - Admin login failed on the deployed page because the sign-in form described in the old handoff (v1.2) was never pushed to GitHub (section 3). The fix is on `main` (v1.3 commit `4a84047`).
 - v1.4 fixed the demo gate (24h and 20 clean trades): the clock starts at the first "Start Demo Testing" and is not reset by pausing or restarting.
 - v1.5 adds full state continuity (section 4): flags, kill switch, demo clock and count, open position, Telegram settings, closed trades and (encrypted) API keys are saved to a local SQLite file on every change and restored on startup, so a restart or a hard kill no longer wipes the console. The loop that actually places demo trades is still not built, so the trade count stays at 0 until it is.
-- Tests: `pytest -q` gives 97 passed with the `cryptography` package installed, and 84 passed + 13 skipped (skips are the encryption-dependent tests, with a visible reason) without it. Run in several test orders. A real server was also killed with `kill -9` and restarted: demo state, clock, 21 trades, keys and Telegram settings came back, no secret was readable on disk, and live trading did not restart by itself. The sign-in page itself has not been opened in a browser.
+- v1.6 makes the phone (or any always-on device) the home of the state: `scripts/run_on_phone.sh` keeps the state file on the device, restarts the app within seconds if it dies and the restarted app loads the last save; `src/tools/backup_state.py` makes verified backup copies and restores them; the dashboard has a **Saved State** card (saving on/off, last save time, what was restored, warnings). The hosted web version is unchanged and still works (below).
+- Tests: `pytest -q` gives 116 passed with the `cryptography` package installed, and 103 passed + 13 skipped (skips are the encryption-dependent tests, with a visible reason) without it. Run in several test orders. A real server was also killed with `kill -9` and restarted: demo state, clock, 21 trades, keys and Telegram settings came back, no secret was readable on disk, and live trading did not restart by itself. The page was driven end to end in a simulated browser (jsdom: sign-in, start demo, save keys, kill switch, and again after `kill -9`), but **not in a real browser**. The launcher was tested on Linux (hard kill, restart, state reload, backups, refusing weak passwords); **it has not been run on a real Android phone or in Termux**.
+- Hosted web version: checked by running the Dockerfile's command with `DATABASE_URL` unset: `/` and `/health` return 200 and the console shows "Saving is OFF". On a host with an ephemeral disk the state is lost on redeploy, as before. The Dockerfile sets `DATABASE_URL=/data/trading_bot.db`; that only persists if `/data` is a persistent volume.
 
 ## 2. What exists in the code
 
@@ -68,6 +70,15 @@ Not built yet: the bot wallet ledger and 24-hour withdrawal lock, a backtest run
   - **Fly.io:** no free plan for new customers; trial only.
 - No free hosted option stays awake with a persistent disk. Render's own docs say a free web service has an ephemeral filesystem (SQLite files are lost on every redeploy, restart or spin-down) and that its free Postgres expires after 30 days with a 14-day grace period before deletion (https://render.com/docs/free). Koyeb and Fly.io need a card.
 - **An always-on device you control keeps the state file**, with no card needed: a phone running Termux, a spare PC or a Raspberry Pi. Android may kill background apps, so battery optimization must be turned off for the terminal app and a wake lock held; this was not verified in this session, so check Termux's current docs. Open the dashboard through a private tunnel such as Tailscale rather than a public URL (free-tier terms not verified).
+- **Phone setup (v1.6).** In Termux: install Python and git, `git clone` the repo, `pip install -e ".[secrets]"` (if `cryptography` will not build, install Termux's own package for it, or run without it: keys then stay in memory only). Then:
+  ```bash
+  cp scripts/phone.env.example ~/.trading-bot.env && chmod 600 ~/.trading-bot.env
+  nano ~/.trading-bot.env          # your own ADMIN_USER / ADMIN_PASS / STATE_ENCRYPTION_KEY
+  termux-setup-storage             # only if you want backups on shared storage
+  bash scripts/run_on_phone.sh
+  ```
+  The state file is `~/trading-bot-state/trading_bot.db` (Termux's private storage; it survives the app being killed or the phone rebooting, but is **erased if Termux's data is cleared or the app is uninstalled**). For that, set `BOT_BACKUP_DIR` to a folder on shared storage (hourly verified copies, newest 24 kept). Restore on a new phone with `python -m src.tools.backup_state restore <backup file> <state file>` (add `--force` to overwrite; the old file is kept as `.before-restore`). The launcher refuses the public default password, one shorter than 10 characters, and warns if the env file is readable by others.
+  Open the page at `http://127.0.0.1:8080` on the phone itself. To open it from another device, set `BOT_HOST=0.0.0.0` (plain HTTP, trusted Wi-Fi only) or use a private tunnel. The phone must also have battery optimization turned off for Termux; the script holds a wake lock if `termux-wake-lock` (Termux:API) exists. Neither was verified here. If the phone reboots, Termux does not start the script by itself (Termux:Boot can, not tested).
 - Other options: Render free plus an external pinger and an external free database (for example Neon, which needs no card; the state layer would have to be moved to Postgres, which is not built), or a small paid VPS (about $4-5 a month, needs a payment method). Decide before wiring in the live loop.
 - Repo has a `Dockerfile` (port 8080, `PORT` env var) and a `fly.toml`.
 
@@ -104,7 +115,7 @@ Keep the `DATABASE_URL` file on storage that survives restarts and back it up. K
 1. Choose where it runs (section 5). Set `ADMIN_USER`, `ADMIN_PASS`, `DATABASE_URL` and `STATE_ENCRYPTION_KEY`, run from `main`, and confirm you can sign in and that state survives a restart.
 2. Wire the engine: candle polling with retry/backoff, `Strategy1StateMachine`, risk and net RR gates, demo orders on Bybit demo with stop and take-profit placed on Bybit itself, and a call to `record_demo_trade(...)` / `record_live_trade(...)` when each trade closes (this is what makes the gate unlock).
 3. On startup the engine must ask Bybit for open positions and orders and reconcile them with the saved `active_position` before trading. Once that exists, `AUTO_RESUME_LIVE` can be reconsidered.
-4. Show the `persistence` block on the dashboard.
+4. Done in v1.6: the `persistence` block is shown on the dashboard (Saved State card).
 5. Build the wallet ledger and 24-hour withdrawal lock, then the backtest runner.
 6. Open decisions from the PRD: risk guard below $50, leverage tiers (100x from $10 to $50, 50x above, below $10 no trading), alert channel, and how many clean demo trades before live.
 

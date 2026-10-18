@@ -153,3 +153,15 @@ async def test_dashboard_page_contains_sign_in_form():
         assert 'id="loginOverlay"' in res.text
         assert "authFetch" in res.text
         assert "/api/login" in res.text
+
+
+@pytest.mark.asyncio
+async def test_dashboard_page_has_saved_state_card_and_safe_rendering():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/")
+        assert res.status_code == 200
+        for marker in ('id="persistCard"', 'id="persistState"', 'id="persistResumed"', "renderPersistence", "data.persistence"):
+            assert marker in res.text, marker
+        # Server-supplied notes must be inserted as text, never as HTML.
+        assert "li.textContent = text" in res.text
