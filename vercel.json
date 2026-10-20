@@ -1,0 +1,5 @@
+{
+  "functions": {
+    "vercel_app/server.py": { "includeFiles": "src/web/templates/**" }
+  }
+}

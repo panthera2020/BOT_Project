@@ -1,4 +1,4 @@
-# Handoff and Status (v1.8, 2026-10-18)
+# Handoff and Status (v1.9, 2026-10-20)
 
 **Update this file every time the work changes, and prepare a fresh copy whenever usage is about to run out.**
 
@@ -13,7 +13,8 @@
 - v1.6 makes the phone (or any always-on device) the home of the state: `scripts/run_on_phone.sh` keeps the state file on the device, restarts the app within seconds if it dies and the restarted app loads the last save; `src/tools/backup_state.py` makes verified backup copies and restores them; the dashboard has a **Saved State** card (saving on/off, last save time, what was restored, warnings). The hosted web version is unchanged and still works (below).
 - v1.7 adds the demo engine (`src/engine/`), exchange-side stop and take-profits, closed-trade recording that feeds the demo gate, kill switch that closes the trade on Bybit, and an honest radar on the dashboard. The Bybit adapter now raises on errors instead of returning empty results.
 - v1.8 adds the **short side** and fixes two faults in v1.7: it did not follow the PRD trend table (a long could be taken when the 15m trend was Down), and take-profit / breakeven prices were not rounded to Bybit's 0.1 tick, which Bybit would have rejected. Saved setups from v1.7 (no side) are read as long.
-- Tests: `pytest -q` gives 188 passed with the `cryptography` package installed, and 175 passed + 13 skipped (skips are the encryption-dependent tests, with a visible reason) without it. Run in several test orders. A real server was also killed with `kill -9` and restarted: demo state, clock, 21 trades, keys and Telegram settings came back, no secret was readable on disk, and live trading did not restart by itself. The page was driven end to end in a simulated browser (jsdom: sign-in, start demo, save keys, kill switch, and again after `kill -9`), but **not in a real browser**. The launcher was tested on Linux (hard kill, restart, state reload, backups, refusing weak passwords); **it has not been run on a real Android phone or in Termux**.
+- v1.9 adds the **Supabase link and the Vercel remote dashboard** (section 5b). The engine still runs only on the phone. Supabase holds a copy of the phone's state and trades and a mailbox for commands; the Vercel page shows the phone's latest status and sends Start / Pause / Kill to it. **None of this was run against real Supabase or Vercel** (the build workspace cannot reach them); it was tested against an in-memory imitation of Supabase's REST API (`tests/fake_supabase.py`).
+- Tests (v1.8 figures; v1.9 now has 241 passing with `cryptography`, 228 + 13 skipped without it): `pytest -q` gave 188 passed with the `cryptography` package installed, and 175 passed + 13 skipped (skips are the encryption-dependent tests, with a visible reason) without it. Run in several test orders. A real server was also killed with `kill -9` and restarted: demo state, clock, 21 trades, keys and Telegram settings came back, no secret was readable on disk, and live trading did not restart by itself. The page was driven end to end in a simulated browser (jsdom: sign-in, start demo, save keys, kill switch, and again after `kill -9`), but **not in a real browser**. The launcher was tested on Linux (hard kill, restart, state reload, backups, refusing weak passwords); **it has not been run on a real Android phone or in Termux**.
 - Hosted web version: checked by running the Dockerfile's command with `DATABASE_URL` unset: `/` and `/health` return 200 and the console shows "Saving is OFF". On a host with an ephemeral disk the state is lost on redeploy, as before. The Dockerfile sets `DATABASE_URL=/data/trading_bot.db`; that only persists if `/data` is a persistent volume.
 
 ## 2. What exists in the code
@@ -125,9 +126,29 @@ uvicorn src.web.app:app --port 8080
 
 Keep the `DATABASE_URL` file on storage that survives restarts and back it up. Keep `STATE_ENCRYPTION_KEY` out of the repository and out of the state file's folder.
 
+## 5b. Supabase + Vercel (v1.9): remote dashboard and cloud backup
+
+How it fits: the phone runs the bot and its SQLite file as before. If `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` are set, the phone also (a) pushes a status snapshot every 10s, (b) checks every 5s for Start / Pause / Kill pressed on the Vercel page and runs them, (c) copies its saved state and each closed trade to Supabase every 60s (only what changed). The trading engine never waits on Supabase; if it is down the console shows the error in its `cloud` status block and trading carries on. **Bybit API keys never go through Vercel; the Vercel page refuses to save keys, Telegram settings and live controls ("do it on the phone").** The encrypted keys are copied to Supabase only if `SUPABASE_SYNC_SECRETS=1` (default off).
+
+Recovery: a phone that starts with an **empty** state file and finds a backup in Supabase restores it (flags, demo clock, trade count, trades). A phone that already has saved state keeps its own (local wins). Open positions: a restored open position is reconciled with Bybit by the engine as after any restart.
+
+Setup (all free tiers; Supabase may ask for no card, check their page):
+1. Supabase: create a project, open SQL Editor, paste and run `supabase/schema.sql` (creates 4 tables with row-level security on and no policies, so the public key can do nothing). Project Settings > API: copy the project URL and the **secret** key (`sb_secret_...`, or the legacy `service_role` key). Never put it in the page, the repo or a chat.
+2. Phone: add to `~/.trading-bot.env`: `SUPABASE_URL=https://<ref>.supabase.co` and `SUPABASE_SERVICE_KEY=<secret key>`. Restart the launcher. `/api/status` then shows `cloud.configured: true`, and `last_push_utc` fills in within ~10s.
+3. Vercel: import the GitHub repo as a new project. Environment variables: `ADMIN_USER`, `ADMIN_PASS` (10+ characters, not the default; the page refuses to work otherwise), `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`. Deploy. `pyproject.toml` has `[tool.vercel] entrypoint = "vercel_app.server:app"` and `vercel.json` includes the page template. Open the Vercel URL, sign in. A green "Remote view: phone online" banner means the phone is reporting; a red banner means no report for over 60s (the data shown is old).
+
+Behaviour to know:
+- Pressing a button when the phone is online waits up to 8s for the phone's answer. When it is offline the request is queued: **Start is dropped after 2 minutes** (so it cannot surprise you later), **Pause and Kill wait until the phone is back.** An offline phone cannot close a trade; Bybit-side stop-loss and take-profit orders stay in place, and the Bybit app is the fallback.
+- Vercel Hobby has no background processes, so the Vercel app only reads and writes Supabase; it cannot run the bot.
+- Supabase free projects can be paused after about a week of low activity; the phone's constant traffic should prevent that, but check the dashboard if the page goes red for no reason.
+- Anyone with the Vercel URL and your `ADMIN_*` login can press Kill / Start remotely. Use a long password.
+
+**Not verified:** Vercel's zero-config FastAPI detection with the `tool.vercel` entrypoint and `includeFiles` for the page template (if the page says "template missing", the deployment did not include `src/web/templates/index.html`); that Vercel installs the dependencies from `pyproject.toml` in reasonable time (they include some the page does not need); real Supabase behaviour (key header handling for `sb_secret_` keys follows its docs); the page in a real browser (only a simulated one showed the banner). Tests: `tests/test_cloud_sync.py`, `tests/test_vercel_app.py`.
+
 ## 7. Next steps, in order
 
 1. Update the phone: `cd ~/BOT_Project && git pull origin main`, restart `bash scripts/run_on_phone.sh`. Demo testing with saved keys starts the engine by itself; watch the dashboard's Market Radar and Telegram for the first sweep.
+1a. Optional (v1.9): set up Supabase and Vercel (section 5b) for a remote dashboard and cloud backup.
 1b. Choose where it runs (section 5). Set `ADMIN_USER`, `ADMIN_PASS`, `DATABASE_URL` and `STATE_ENCRYPTION_KEY`, run from `main`, and confirm you can sign in and that state survives a restart.
 2. Done in v1.7: the demo engine (see section 4). Next: run it on the real Bybit demo account, read the first trades against the strategy rules, and fix any API mismatch.
 3. Before any live trading: build live execution, a Bybit reconcile of live positions at startup, and only then reconsider `AUTO_RESUME_LIVE`.

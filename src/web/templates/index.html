@@ -126,6 +126,7 @@
 </head>
 <body>
   <div class="container">
+    <div id="remoteBanner" style="display:none; padding:10px 14px; margin-bottom:12px; border-radius:8px; font-size:13px; font-weight:600;"></div>
     <header>
       <div class="brand">
         <h1>Trading Bot Mission Control</h1>
@@ -513,12 +514,29 @@
       fillList("persistNotes", p.notes, "");
     }
 
+    // Only the remote (Vercel) dashboard sends remote_view; on the phone it is absent.
+    function renderRemoteBanner(rv) {
+      const el = document.getElementById("remoteBanner");
+      if (!rv) { el.style.display = "none"; return; }
+      el.style.display = "block";
+      if (rv.online) {
+        el.style.background = "rgba(16,185,129,0.15)"; el.style.color = "#34d399";
+        el.innerText = "Remote view: phone online (updated " + rv.age_seconds + "s ago)";
+      } else {
+        el.style.background = "rgba(239,68,68,0.15)"; el.style.color = "#f87171";
+        el.innerText = rv.last_seen
+          ? "Phone OFFLINE: last heard from it " + rv.last_seen + ". What you see below is old. Its Bybit stop-loss and take-profit orders stay active. Buttons are queued until it is back."
+          : "Phone has never reported in. Check SUPABASE_URL and SUPABASE_SERVICE_KEY on the phone.";
+      }
+    }
+
     async function fetchStatus() {
       if (!getAuth()) { showLogin(); return; }
       try {
         const res = await authFetch("/api/status");
         if (!res.ok) return;
         const data = await res.json();
+        renderRemoteBanner(data.remote_view);
 
         // Update Header Badge
         const badge = document.getElementById("botStatusBadge");

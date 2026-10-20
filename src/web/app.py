@@ -33,6 +33,8 @@ from src.storage.secrets_box import SecretsBox
 from src.engine.demo_engine import DemoEngine
 from src.exchange.bybit_adapter import BybitV5Adapter
 from src.storage.state_store import StateStore
+from src.remote.cloud_sync import CloudSync
+from src.remote.supabase import SupabaseClient, config_from_env as supabase_config
 
 
 @asynccontextmanager
@@ -40,9 +42,11 @@ async def _lifespan(_app: FastAPI):
     # Bring back everything saved before the last restart (flags, clock, trades, keys...).
     await load_persisted_state()
     await sync_engine()  # demo testing that was running before the restart carries on
+    await start_cloud()
     try:
         yield
     finally:
+        await stop_cloud()
         await _stop_engine()
 
 
@@ -179,6 +183,11 @@ async def load_persisted_state() -> None:
     try:
         store = StateStore(db_path=STATE_DB_PATH)
         await store.init_db()
+
+        if await store.get_state(_KEY_STATE) is None:
+            note = await _restore_from_cloud(store)
+            if note:
+                notes.append(note)
 
         raw = await store.get_state(_KEY_STATE)
         if raw:
@@ -339,6 +348,116 @@ async def _close_open_position_for_kill() -> str:
         return f"Could not confirm the position was closed ({exc})."
 
 
+# ---------------------------------------------------------------- Supabase link (optional)
+# With SUPABASE_URL and SUPABASE_SERVICE_KEY set, the phone
+#   * pushes a status snapshot every few seconds (the Vercel dashboard shows it),
+#   * runs the Start / Stop / Kill commands pressed on that dashboard,
+#   * keeps a copy of its saved state and trades in Supabase, and restores from it only when
+#     it starts with no saved state of its own (a new or wiped phone).
+# SUPABASE_SYNC_SECRETS=1 also copies the (encrypted) API keys; off by default.
+# The trading engine never depends on this: if Supabase is unreachable, trading goes on.
+_CLOUD: Optional[CloudSync] = None
+_CLOUD_TASK: Optional["asyncio.Task[None]"] = None
+CLOUD_COMMAND_SECONDS = 5.0
+CLOUD_STATUS_SECONDS = 10.0
+CLOUD_MIRROR_SECONDS = 60.0
+
+
+def _make_cloud() -> Optional[CloudSync]:
+    cfg = supabase_config()
+    if not cfg:
+        return None
+    try:
+        client = SupabaseClient(cfg["url"], cfg["key"])
+    except ValueError as exc:
+        logger.warning("Supabase not used: %s", exc)
+        return None
+    sync = os.environ.get("SUPABASE_SYNC_SECRETS", "").strip().lower() in {"1", "true", "yes"}
+    return CloudSync(client, sync_secrets=sync)
+
+
+async def _restore_from_cloud(store: StateStore) -> Optional[str]:
+    """Local store has no saved state: take the Supabase copy, if there is one."""
+    cloud = _CLOUD or _make_cloud()
+    if cloud is None:
+        return None
+    backup = await cloud.fetch_backup()
+    if backup is None:
+        if cloud.last_error:
+            return f"Could not reach Supabase to look for a backup ({cloud.last_error})."
+        return None
+    await store.set_many(backup["state"])
+    for trade in backup["trades"]:
+        try:
+            await store.save_trade(trade)
+        except Exception as exc:
+            logger.warning("Could not restore trade %s: %s", trade.get("id"), exc)
+    return "This phone had no saved state, so it was restored from the Supabase backup."
+
+
+async def _cloud_local_snapshot():
+    items: Dict[str, str] = {_KEY_STATE: _plain_json()}
+    trades: List[Dict[str, Any]] = []
+    if STATE_DB_PATH:
+        store = StateStore(db_path=STATE_DB_PATH)
+        blob = await store.get_state(_KEY_SECRETS)
+        if blob:
+            items[_KEY_SECRETS] = blob
+        trades = await store.load_trades()
+    return items, trades
+
+
+async def _cloud_loop(cloud: CloudSync) -> None:
+    handlers = {
+        "start_demo": lambda: start_demo_testing(user="cloud"),
+        "stop_demo": lambda: stop_demo_testing(user="cloud"),
+        "kill": lambda: trigger_emergency_kill(user="cloud"),
+    }
+    loop = asyncio.get_running_loop()
+    last_status = last_mirror = float("-inf")
+    try:
+        await cloud.prune()
+        while True:
+            try:
+                await cloud.run_pending_commands(handlers)
+                now = loop.time()
+                if now - last_status >= CLOUD_STATUS_SECONDS:
+                    last_status = now
+                    await cloud.push_status(_build_status())
+                if now - last_mirror >= CLOUD_MIRROR_SECONDS:
+                    last_mirror = now
+                    items, trades = await _cloud_local_snapshot()
+                    await cloud.mirror(items, trades)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # the link must never take the console down
+                cloud._fail(exc)
+            await asyncio.sleep(CLOUD_COMMAND_SECONDS)
+    except asyncio.CancelledError:
+        pass
+
+
+async def start_cloud() -> None:
+    global _CLOUD, _CLOUD_TASK
+    if _CLOUD_TASK is not None:
+        return
+    _CLOUD = _make_cloud()
+    if _CLOUD is not None:
+        _CLOUD_TASK = asyncio.create_task(_cloud_loop(_CLOUD))
+
+
+async def stop_cloud() -> None:
+    global _CLOUD, _CLOUD_TASK
+    task, _CLOUD_TASK = _CLOUD_TASK, None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+    _CLOUD = None
+
+
 async def record_trade(
     mode: str,
     symbol: str,
@@ -494,6 +613,10 @@ async def serve_dashboard():
 
 @app.get("/api/status")
 async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
+    return _build_status()
+
+
+def _build_status() -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
     gate = evaluate_demo_gate(
         RUNTIME_STATE["demo_run_start_time"], RUNTIME_STATE["clean_demo_trade_count"], now=now
@@ -547,6 +670,7 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
         },
         "persistence": _persistence_status(),
         "engine": engine_info,
+        "cloud": _CLOUD.describe() if _CLOUD else {"configured": False},
     }
 
 

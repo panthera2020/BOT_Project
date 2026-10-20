@@ -1,0 +1,6 @@
+tests
+*.pdf
+*.png
+*.jpg
+HANDOFF.md
+scripts

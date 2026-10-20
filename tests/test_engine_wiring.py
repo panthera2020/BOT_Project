@@ -154,3 +154,16 @@ async def test_live_start_message_is_honest_about_live_execution():
     web_app.RUNTIME_STATE["demo_run_start_time"] = None
     with pytest.raises(Exception):
         await web_app.start_live_trading(user="t")   # still locked: no 24h / 20 trades
+
+
+@pytest.mark.asyncio
+async def test_status_with_an_open_trade_can_be_sent_as_json(sim_engine):
+    """The Supabase push serialises the status; an open trade must not break that."""
+    await save_keys()
+    await web_app.start_demo_testing(user="t")
+    try:
+        assert await wait_for(lambda: web_app.RUNTIME_STATE["active_position"] is not None)
+        text = json.dumps(web_app._build_status())
+        assert json.loads(text)["active_position"]["symbol"] == "BTCUSDT"
+    finally:
+        await web_app.stop_demo_testing(user="t")
