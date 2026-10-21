@@ -103,3 +103,17 @@ async def test_orders_also_recover_from_a_clock_that_drifts(bybit):
     await ad.cancel_order("1", "BTCUSDT")
     fake.skew_ms = 3000
     assert await ad.cancel_order("1", "BTCUSDT") is True
+
+
+def test_http_timeout_default_and_override(monkeypatch):
+    monkeypatch.delenv("BOT_HTTP_TIMEOUT", raising=False)
+    assert bybit_adapter._http_timeout() == 20.0
+    monkeypatch.setenv("BOT_HTTP_TIMEOUT", "35")
+    assert bybit_adapter._http_timeout() == 35.0
+    monkeypatch.setenv("BOT_HTTP_TIMEOUT", "junk")
+    assert bybit_adapter._http_timeout() == 20.0
+    monkeypatch.setenv("BOT_HTTP_TIMEOUT", "1")
+    assert bybit_adapter._http_timeout() == 5.0
+    from src.remote.supabase import SupabaseClient
+    monkeypatch.setenv("BOT_HTTP_TIMEOUT", "30")
+    assert SupabaseClient("https://x.supabase.co", "k")._timeout == 30.0

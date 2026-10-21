@@ -2,6 +2,7 @@
 Bybit V5 REST & WebSocket Exchange Adapter.
 Supports Bybit Demo Trading (api-demo.bybit.com) and Live Mainnet (api.bybit.com).
 """
+import os
 import time
 import hmac
 import hashlib
@@ -9,6 +10,14 @@ import json
 import httpx
 from typing import Optional, Dict, Any, List
 from src.exchange.adapter import ExchangeAdapter
+
+
+def _http_timeout() -> float:
+    """Seconds to wait for Bybit. Phone connections are slow at times; BOT_HTTP_TIMEOUT overrides."""
+    try:
+        return max(5.0, float(os.environ.get("BOT_HTTP_TIMEOUT", "20")))
+    except ValueError:
+        return 20.0
 
 
 class BybitV5Adapter(ExchangeAdapter):
@@ -48,7 +57,7 @@ class BybitV5Adapter(ExchangeAdapter):
         for base in (self.LIVE_BASE_URL, self.DEMO_BASE_URL):
             try:
                 before = time.time() * 1000
-                async with httpx.AsyncClient(timeout=5.0) as client:
+                async with httpx.AsyncClient(timeout=min(_http_timeout(), 10.0)) as client:
                     resp = await client.get(f"{base}/v5/market/time")
                 after = time.time() * 1000
                 data = resp.json()
@@ -81,7 +90,7 @@ class BybitV5Adapter(ExchangeAdapter):
         last_error: Optional[Exception] = None
         for base in (self.LIVE_BASE_URL, self.DEMO_BASE_URL):
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                async with httpx.AsyncClient(timeout=_http_timeout()) as client:
                     resp = await client.get(f"{base}/v5/market/kline", params=params)
                     data = resp.json()
                 if data.get("retCode") == 0:
@@ -124,7 +133,7 @@ class BybitV5Adapter(ExchangeAdapter):
             if not self._clock_synced:
                 await self._sync_clock()
             headers = self._get_headers(payload_str)
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=_http_timeout()) as client:
                 resp = await client.post(f"{self.base_url}{path}", headers=headers, content=payload_str)
                 data = resp.json()
             if data.get("retCode") == 10002 and attempt == 1:  # timestamp rejected: re-measure, retry once
@@ -137,7 +146,7 @@ class BybitV5Adapter(ExchangeAdapter):
             if not self._clock_synced:
                 await self._sync_clock()
             headers = self._get_headers(params)
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=_http_timeout()) as client:
                 resp = await client.get(f"{self.base_url}{path}?{params}", headers=headers)
                 data = resp.json()
             if data.get("retCode") == 10002 and attempt == 1:

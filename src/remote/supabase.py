@@ -27,11 +27,16 @@ def config_from_env() -> Optional[Dict[str, str]]:
 
 
 class SupabaseClient:
-    def __init__(self, url: str, key: str, client: Optional[httpx.AsyncClient] = None, timeout: float = 10.0):
+    def __init__(self, url: str, key: str, client: Optional[httpx.AsyncClient] = None, timeout: Optional[float] = None):
         if not url.startswith("https://") and not url.startswith("http://127.0.0.1") and not url.startswith("http://localhost"):
             raise ValueError("SUPABASE_URL must start with https://")
         self.base = url.rstrip("/") + "/rest/v1"
         self._client = client
+        if timeout is None:
+            try:
+                timeout = max(5.0, float(os.environ.get("BOT_HTTP_TIMEOUT", "20")))
+            except ValueError:
+                timeout = 20.0
         self._timeout = timeout
         # New-style keys (sb_secret_...) go on the apikey header only; legacy JWT keys also
         # go on Authorization.
