@@ -27,6 +27,12 @@ class BybitV5Adapter(ExchangeAdapter):
         self.is_demo = is_demo
         self.recv_window = recv_window
         self.base_url = self.DEMO_BASE_URL if is_demo else self.LIVE_BASE_URL
+        # Bybit rejects a request stamped more than 1s ahead of its own clock (error 10002).
+        # Phone clocks are often off by a second or two, so stamp requests with Bybit's time:
+        # offset = Bybit's clock - this device's clock, measured before the first signed
+        # request and again whenever Bybit answers 10002.
+        self._clock_offset_ms = 0
+        self._clock_synced = False
 
     def _generate_signature(self, timestamp: str, payload_str: str) -> str:
         param_str = f"{timestamp}{self.api_key}{self.recv_window}{payload_str}"
@@ -36,8 +42,26 @@ class BybitV5Adapter(ExchangeAdapter):
             hashlib.sha256,
         ).hexdigest()
 
+    async def _sync_clock(self) -> None:
+        """Measure the gap between this device's clock and Bybit's. Failure is not fatal: the
+        old offset stays and the next 10002 triggers another try."""
+        for base in (self.LIVE_BASE_URL, self.DEMO_BASE_URL):
+            try:
+                before = time.time() * 1000
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(f"{base}/v5/market/time")
+                after = time.time() * 1000
+                data = resp.json()
+                result = data.get("result", {})
+                server_ms = int(result["timeNano"]) // 1_000_000 if result.get("timeNano") else int(result["timeSecond"]) * 1000
+                self._clock_offset_ms = int(server_ms - (before + after) / 2)
+                self._clock_synced = True
+                return
+            except Exception:
+                continue
+
     def _get_headers(self, payload_str: str = "") -> Dict[str, str]:
-        timestamp = str(int(time.time() * 1000))
+        timestamp = str(int(time.time() * 1000) + self._clock_offset_ms)
         signature = self._generate_signature(timestamp, payload_str)
         return {
             "X-BAPI-API-KEY": self.api_key,
@@ -84,33 +108,42 @@ class BybitV5Adapter(ExchangeAdapter):
         return 0.0
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        url = f"{self.base_url}/v5/position/set-leverage"
         payload = {
             "category": "linear",
             "symbol": symbol,
             "buyLeverage": str(leverage),
             "sellLeverage": str(leverage),
         }
-        payload_str = json.dumps(payload)
-        headers = self._get_headers(payload_str)
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, headers=headers, content=payload_str)
-            data = resp.json()
-            # RetCode 0 or 110043 (leverage not modified) is considered OK
-            return data.get("retCode") in [0, 110043]
+        data = await self._post("/v5/position/set-leverage", payload)
+        # RetCode 0 or 110043 (leverage not modified) is considered OK
+        return data.get("retCode") in [0, 110043]
 
     async def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload_str = json.dumps(payload)
-        headers = self._get_headers(payload_str)
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(f"{self.base_url}{path}", headers=headers, content=payload_str)
-            return resp.json()
+        for attempt in (1, 2):
+            if not self._clock_synced:
+                await self._sync_clock()
+            headers = self._get_headers(payload_str)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(f"{self.base_url}{path}", headers=headers, content=payload_str)
+                data = resp.json()
+            if data.get("retCode") == 10002 and attempt == 1:  # timestamp rejected: re-measure, retry once
+                self._clock_synced = False
+                continue
+            return data
 
     async def _get(self, path: str, params: str) -> Dict[str, Any]:
-        headers = self._get_headers(params)
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{self.base_url}{path}?{params}", headers=headers)
-            return resp.json()
+        for attempt in (1, 2):
+            if not self._clock_synced:
+                await self._sync_clock()
+            headers = self._get_headers(params)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{self.base_url}{path}?{params}", headers=headers)
+                data = resp.json()
+            if data.get("retCode") == 10002 and attempt == 1:
+                self._clock_synced = False
+                continue
+            return data
 
     async def place_order(self, order_req: Dict[str, Any]) -> Dict[str, Any]:
         """Places an order. Optional order_req keys: price (Limit), reduce_only,
@@ -166,13 +199,8 @@ class BybitV5Adapter(ExchangeAdapter):
         return data.get("result", {}).get("list", [])
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        url = f"{self.base_url}/v5/order/cancel"
-        payload = {"category": "linear", "symbol": symbol, "orderId": order_id}
-        payload_str = json.dumps(payload)
-        headers = self._get_headers(payload_str)
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, content=payload_str)
-            return resp.json().get("retCode") == 0
+        data = await self._post("/v5/order/cancel", {"category": "linear", "symbol": symbol, "orderId": order_id})
+        return data.get("retCode") == 0
 
     async def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
         """The open position, or None when flat. Raises if Bybit cannot be reached or
