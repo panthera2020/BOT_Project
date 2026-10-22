@@ -349,3 +349,46 @@ async def test_empty_supabase_and_empty_phone_just_starts_fresh(console):
     await web_app.load_persisted_state()
     assert web_app.RUNTIME_STATE["clean_demo_trade_count"] == 0
     assert not any("Supabase" in n for n in web_app.PERSISTENCE_INFO["notes"])
+
+
+@pytest.mark.asyncio
+async def test_a_command_argument_reaches_its_handler_and_plain_commands_still_work():
+    fake = FakeSupabase()
+    cid = fake.add_command("select_strategy")
+    fake.command(cid)["arg"] = "trend_pullback"
+    plain = fake.add_command("stop_demo")
+    got = []
+
+    async def pick(arg):
+        got.append(arg)
+        return {"message": f"picked {arg}"}
+
+    async def stop():
+        got.append("stop")
+        return {"message": "stopped"}
+
+    await CloudSync(fake.api()).run_pending_commands({"select_strategy": pick, "stop_demo": stop})
+    assert got == ["trend_pullback", "stop"] and fake.command(cid)["result"] == "picked trend_pullback"
+    assert fake.command(plain)["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_strategy_switch_command_changes_the_strategy_on_the_phone(console):
+    fake = console
+    await web_app.start_cloud()
+    try:
+        cid = fake.add_command("select_strategy")
+        fake.command(cid)["arg"] = "breakout_retest"
+        assert await until(lambda: fake.command(cid)["status"] == "done")
+        assert web_app.RUNTIME_STATE["active_strategy"] == "breakout_retest"
+        bad = fake.add_command("select_strategy")
+        fake.command(bad)["arg"] = "does_not_exist"
+        assert await until(lambda: fake.command(bad)["status"] == "error")
+        assert "Unknown strategy" in fake.command(bad)["result"] and web_app.RUNTIME_STATE["active_strategy"] == "breakout_retest"
+        web_app.RUNTIME_STATE["active_position"] = {"mode": "DEMO"}
+        busy = fake.add_command("select_strategy")
+        fake.command(busy)["arg"] = "trend_pullback"
+        assert await until(lambda: fake.command(busy)["status"] == "error")
+        assert "trade is open" in fake.command(busy)["result"]
+    finally:
+        await web_app.stop_cloud()

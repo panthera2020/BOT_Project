@@ -15,8 +15,10 @@ K = 204000.0  # mirror constant in sim_exchange.mirror
 
 
 class Harness:
-    def __init__(self, side="Buy", markets=None, balance=1000.0, mirror_markets=None, strategy_id="sweep_reversal", now=None):
+    def __init__(self, side="Buy", markets=None, balance=1000.0, mirror_markets=None, strategy_id="sweep_reversal", now=None, mode="DEMO", max_daily_trades=2):
         self.side = side
+        self.mode = mode
+        self.max_daily_trades = max_daily_trades
         self.strategy_id = strategy_id
         self.clock = Clock(now) if now else Clock()
         markets = markets or default_markets()
@@ -39,7 +41,8 @@ class Harness:
         async def notify(title, body, level):
             self.alerts.append(title)
 
-        return DemoEngine(self.sim, self.state, persist, record, notify, now_fn=self.clock.now, sleep=self.clock.sleep, strategy_id=self.strategy_id)
+        return DemoEngine(self.sim, self.state, persist, record, notify, now_fn=self.clock.now, sleep=self.clock.sleep, strategy_id=self.strategy_id,
+                          mode=self.mode, max_daily_trades=self.max_daily_trades)
 
     def restart(self):
         """A restart: state goes through JSON (as the saved file does) into a brand-new engine."""

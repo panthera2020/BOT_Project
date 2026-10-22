@@ -21,11 +21,6 @@ _MODES = {"DEMO", "LIVE"}
 _BOOL_FLAGS = ("is_bot_running", "demo_testing_active", "live_trading_active", "kill_switch_triggered")
 
 
-def known_strategies() -> set:
-    from src.engine.strategies import REGISTRY  # imported late: the engine package is heavier than this module
-    return set(REGISTRY)
-
-
 def snapshot_plain(state: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     started = state.get("demo_run_start_time")
@@ -103,19 +98,20 @@ def restore_plain(state: Dict[str, Any], data: Any) -> List[str]:
 
     chosen = data.get("active_strategy")
     if chosen is not None:
-        if isinstance(chosen, str) and chosen in known_strategies():
-            state["active_strategy"] = chosen
+        if isinstance(chosen, str) and chosen:
+            state["active_strategy"] = chosen   # may name a strategy that is no longer installed; the console falls back
         else:
-            problems.append("active_strategy is not a known strategy; keeping the default")
+            problems.append("active_strategy is invalid; keeping the default")
 
     progress = data.get("strategy_progress")
     if progress is not None:
         if isinstance(progress, dict):
             restored: Dict[str, Any] = {}
             for sid, item in progress.items():
-                ok = sid in known_strategies() and isinstance(item, dict)
-                clean = item.get("clean", 0) if ok else None
-                if not (ok and isinstance(clean, int) and not isinstance(clean, bool) and clean >= 0):
+                # Progress of strategies that are not installed right now is kept, so putting the
+                # strategy back restores its clock and count.
+                clean = item.get("clean", 0) if isinstance(item, dict) else None
+                if not (isinstance(clean, int) and not isinstance(clean, bool) and clean >= 0):
                     problems.append(f"progress of strategy {sid!r} is invalid; ignored")
                     continue
                 start = None

@@ -181,7 +181,7 @@
           <span style="font-size: 11px; background: rgba(16, 185, 129, 0.2); color: #34d399; padding: 3px 8px; border-radius: 4px;">Strict 2 Trades / Day</span>
         </div>
         <p style="font-size: 12px; color: var(--text-muted);">
-          Real execution strictly enforced by the capital tier schedule and locked until 24h & 20 demo trades qualify.
+          Real execution on your Bybit account with the selected strategy, strictly enforced by the capital tier schedule. Locked until that strategy has 24h and 20 clean demo trades of its own. Demo testing pauses while live runs.
         </p>
         <div style="display: flex; gap: 10px; margin-top: 4px;">
           <button id="btnStartLive" class="btn btn-start" disabled onclick="toggleLive(true)">🔒 Live Trading (Locked)</button>
@@ -561,16 +561,17 @@
       card.style.display = "block";
       data.strategies.forEach(s => { strategyNames[s.id] = s.name; });
       const select = document.getElementById("strategySelect");
-      if (select.options.length !== data.strategies.length) {
-        select.innerHTML = data.strategies.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+      const installed = data.strategies.filter(s => s.installed !== false);
+      if (!installed.length) { card.style.display = "none"; return; }
+      if (select.options.length !== installed.length || [...select.options].some((o, i) => o.value !== installed[i].id)) {
+        select.innerHTML = installed.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
       }
-      const active = data.strategies.find(s => s.active) || data.strategies[0];
+      const active = installed.find(s => s.active) || installed[0];
       if (document.activeElement !== select) select.value = active.id;
-      const locked = !!data.remote_view || !!data.active_position;
-      select.disabled = locked;
-      document.getElementById("strategyNote").innerText = data.remote_view
-        ? "Switch strategy on the phone console."
-        : (data.active_position ? "A trade is open: switching is locked until it closes." : "");
+      select.disabled = !!data.active_position || !!data.live_trading_active;
+      document.getElementById("strategyNote").innerText = data.active_position
+        ? "A trade is open: switching is locked until it closes."
+        : (data.live_trading_active ? "Live trading is running: pause it to switch." : (data.remote_view ? "Applied by the phone within a few seconds." : ""));
       document.getElementById("strategySummary").innerText = active.summary;
       document.getElementById("activeStrategyName").innerText = active.name;
       loadStrategyRules().then(() => {
@@ -583,7 +584,7 @@
         const sign = v => (v >= 0 ? "+" : "") + v;
         const gate = g.is_live_unlocked ? "UNLOCKED" : `${g.elapsed_hours}/24h, ${g.clean_trades}/20 trades`;
         return `<tr${s.active ? ' style="background:rgba(59,130,246,0.08);"' : ""}>
-          <td>${esc(s.name)}${s.active ? " &#9679;" : ""}</td>
+          <td>${esc(s.name)}${s.active ? " &#9679;" : ""}${s.installed === false ? ' <span style="color:#fbbf24;">(removed)</span>' : ""}</td>
           <td>${d.wins}W / ${d.losses}L (${d.total_trades})</td>
           <td>${d.total_trades ? d.win_rate + "%" : "-"}</td>
           <td>${d.total_trades ? sign(d.expectancy_r) + "R" : "-"}</td>
@@ -760,6 +761,7 @@
     }
 
     async function toggleLive(start) {
+      if (start && !confirm("Start LIVE trading with real money on your Bybit account?\n\nIt will trade the selected strategy, at most 2 trades per day. Demo testing is paused while live runs.")) return;
       const endpoint = start ? "/api/live/start" : "/api/live/stop";
       try {
         const res = await authFetch(endpoint, { method: "POST" });

@@ -10,6 +10,7 @@ Environment variables (Vercel project settings):
 """
 import asyncio
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -128,12 +129,12 @@ async def get_status(user: str = Depends(authenticate)) -> Dict[str, Any]:
     return payload
 
 
-async def _send(command: str, user_message: str, offline_note: str) -> Dict[str, Any]:
+async def _send(command: str, user_message: str, offline_note: str, arg: Optional[str] = None) -> Dict[str, Any]:
     client = _client()
     try:
         status_rows = await client.select("bot_status", {"id": "eq.1"})
         online = bool(status_rows) and _view(status_rows[0].get("updated_at"), datetime.now(timezone.utc))["online"]
-        row = await client.insert("bot_commands", {"command": command})
+        row = await client.insert("bot_commands", {"command": command} | ({"arg": arg} if arg is not None else {}))
         cid = row.get("id")
         waited = 0.0
         while online and cid is not None and waited < COMMAND_WAIT_SECONDS:
@@ -181,9 +182,22 @@ async def strategies(user: str = Depends(authenticate)) -> Dict[str, Any]:
     return {"active": None, "strategies": strategy_catalog()}
 
 
+class StrategyPayload(BaseModel):
+    strategy_id: str
+
+
 @app.post("/api/strategy")
-async def switch_strategy(user: str = Depends(authenticate)):
-    raise _phone_only("Switching strategy")
+async def switch_strategy(payload: StrategyPayload, user: str = Depends(authenticate)) -> Dict[str, Any]:
+    """Ask the phone to switch strategy. The phone is the judge: it refuses while a trade is
+    open or live is running, or for an id it does not have, and says why."""
+    sid = payload.strategy_id.strip()
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", sid):
+        raise HTTPException(status_code=400, detail="Invalid strategy id.")
+    return await _send(
+        "select_strategy", f"Switched strategy to {sid}.",
+        "Phone is offline. The switch is queued and applies when it is back; if a trade is open then, it will be refused.",
+        arg=sid,
+    )
 
 
 @app.post("/api/keys")

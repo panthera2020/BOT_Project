@@ -41,6 +41,7 @@ def reversion_signal(c15: List[Candle], micro: TrendDirection, buffer: float) ->
 
 class RangeReversion(Strategy):
     id = "range_reversion"
+    order = 60
     name = "Range mean reversion"
     summary = "In a ranging 15m market, fade a close back inside the Bollinger band with an RSI extreme."
     rules = [

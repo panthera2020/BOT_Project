@@ -32,7 +32,7 @@ from src.alerts.notifier import AlertDispatcher
 from src.storage.secrets_box import SecretsBox
 from src.core.strategy_progress import add_clean_trade, get_progress, start_clock_if_needed
 from src.engine.demo_engine import DemoEngine
-from src.engine.strategies import DEFAULT_STRATEGY, REGISTRY, strategy_catalog
+from src.engine.strategies import DEFAULT_STRATEGY, REGISTRY, default_strategy_id, strategy_catalog
 from src.exchange.bybit_adapter import BybitV5Adapter
 from src.storage.state_store import StateStore
 from src.remote.cloud_sync import CloudSync
@@ -43,6 +43,7 @@ from src.remote.supabase import SupabaseClient, config_from_env as supabase_conf
 async def _lifespan(_app: FastAPI):
     # Bring back everything saved before the last restart (flags, clock, trades, keys...).
     await load_persisted_state()
+    await ensure_active_strategy()
     await sync_engine()  # demo testing that was running before the restart carries on
     await start_cloud()
     try:
@@ -237,12 +238,46 @@ async def load_persisted_state() -> None:
         PERSISTENCE_INFO["notes"] = notes + [f"Saved state could not be loaded ({exc}); starting from defaults."]
 
 
+# ---------------------------------------------------------------- strategies (plug and play)
+def _active_strategy() -> Optional[str]:
+    """The strategy to run: the saved choice if it is installed, else the default, else None
+    (no strategy installed)."""
+    chosen = RUNTIME_STATE.get("active_strategy")
+    return chosen if chosen in REGISTRY else default_strategy_id()
+
+
+def _gate_strategy() -> str:
+    """Whose progress the headline gate shows (never None, so the page always has numbers)."""
+    return _active_strategy() or RUNTIME_STATE.get("active_strategy") or DEFAULT_STRATEGY
+
+
+async def ensure_active_strategy() -> None:
+    """A saved choice that is no longer installed (its file was removed) falls back to the
+    default; the strategy's saved results and progress are kept. Live trading is paused in that
+    case because its unlock belonged to the removed strategy."""
+    chosen = RUNTIME_STATE.get("active_strategy")
+    if chosen in REGISTRY:
+        return
+    fallback = default_strategy_id()
+    notes = PERSISTENCE_INFO.setdefault("notes", [])
+    if fallback is None:
+        notes.append("No strategy is installed, so nothing can trade.")
+        return
+    RUNTIME_STATE["active_strategy"] = fallback
+    notes.append(f"Strategy '{chosen}' is not installed any more; switched to {REGISTRY[fallback].name}. Its saved results are kept.")
+    if RUNTIME_STATE["live_trading_active"]:
+        RUNTIME_STATE["live_trading_active"] = False
+        RUNTIME_STATE["current_mode"] = "DEMO"
+        notes.append("Live trading was paused because its unlock belonged to the removed strategy.")
+    await save_console_state()
+
+
 # ---------------------------------------------------------------- trading engine
 # The engine runs as a background task inside this process while demo testing is active.
 #   BOT_ENGINE=off   disables it (used by the tests, or to run the console without trading).
 _ENGINE: Optional[DemoEngine] = None
 _ENGINE_TASK: Optional["asyncio.Task[None]"] = None
-_ENGINE_KEYS: tuple = ("", "", DEFAULT_STRATEGY)
+_ENGINE_KEYS: tuple = ("", "", DEFAULT_STRATEGY, "DEMO")
 
 
 def _engine_enabled() -> bool:
@@ -261,26 +296,50 @@ async def _notify_telegram(title: str, body: str, level: str) -> None:
     await AlertDispatcher(telegram_token=cfg["bot_token"], telegram_chat_id=cfg["chat_id"]).send_alert(title, body, level)
 
 
+def _engine_mode() -> str:
+    """Which account the engine trades. An open trade decides (it must be managed on the
+    account it was opened on); otherwise live when live trading is on, else demo."""
+    pos = RUNTIME_STATE.get("active_position")
+    if pos and pos.get("mode") in ("DEMO", "LIVE"):
+        return pos["mode"]
+    return "LIVE" if RUNTIME_STATE["live_trading_active"] else "DEMO"
+
+
+def _keys_for(mode: str) -> Dict[str, str]:
+    return RUNTIME_STATE["bybit_live_keys" if mode == "LIVE" else "bybit_demo_keys"]
+
+
+def _live_unlocked() -> bool:
+    return evaluate_demo_gate(*get_progress(RUNTIME_STATE, _gate_strategy())).is_unlocked
+
+
 def _engine_wanted() -> bool:
-    keys = RUNTIME_STATE["bybit_demo_keys"]
+    mode = _engine_mode()
+    keys = _keys_for(mode)
+    switched_on = RUNTIME_STATE["live_trading_active"] if mode == "LIVE" else RUNTIME_STATE["demo_testing_active"]
     return bool(
         _engine_enabled()
-        and RUNTIME_STATE["demo_testing_active"]
+        and switched_on
         and not RUNTIME_STATE["kill_switch_triggered"]
         and keys["api_key"] and keys["api_secret"]
+        and _active_strategy() is not None
+        and (mode != "LIVE" or _live_unlocked())   # live never runs without the strategy's own unlock
     )
 
 
 def _new_engine() -> DemoEngine:
-    keys = RUNTIME_STATE["bybit_demo_keys"]
+    mode = _engine_mode()
+    keys = _keys_for(mode)
+    live = mode == "LIVE"
     return DemoEngine(
-        BybitV5Adapter(api_key=keys["api_key"], api_secret=keys["api_secret"], is_demo=True),
+        BybitV5Adapter(api_key=keys["api_key"], api_secret=keys["api_secret"], is_demo=not live),
         RUNTIME_STATE,
         persist=save_console_state,
-        record_trade=record_demo_trade,
+        record_trade=record_live_trade if live else record_demo_trade,
         notify=_notify_telegram,
         poll_seconds=_engine_poll_seconds(),
-        strategy_id=RUNTIME_STATE["active_strategy"],
+        strategy_id=_active_strategy(),
+        mode=mode,
     )
 
 
@@ -305,7 +364,8 @@ async def sync_engine() -> None:
     global _ENGINE, _ENGINE_TASK, _ENGINE_KEYS
     wanted = _engine_wanted()
     running = _ENGINE_TASK is not None and not _ENGINE_TASK.done()
-    keys = (RUNTIME_STATE["bybit_demo_keys"]["api_key"], RUNTIME_STATE["bybit_demo_keys"]["api_secret"], RUNTIME_STATE["active_strategy"])
+    mode_keys = _keys_for(_engine_mode())
+    keys = (mode_keys["api_key"], mode_keys["api_secret"], _active_strategy(), _engine_mode())
     if running and (not wanted or keys != _ENGINE_KEYS):
         await _stop_engine()
         running = False
@@ -313,7 +373,7 @@ async def sync_engine() -> None:
         _ENGINE = _new_engine()
         _ENGINE_KEYS = keys
         _ENGINE_TASK = asyncio.create_task(_ENGINE.run())
-        logger.info("Trading engine started (demo).")
+        logger.info("Trading engine started (%s).", _ENGINE.mode.lower())
 
 
 def _engine_summary() -> Dict[str, Any]:
@@ -323,6 +383,7 @@ def _engine_summary() -> Dict[str, Any]:
         base.update({k: _ENGINE.status.get(k) for k in ("text", "last_scan_utc", "last_decision", "last_error", "balance", "trend")})
         base["consecutive_errors"] = _ENGINE.consecutive_errors
         base["strategy"] = _ENGINE.strategy_id
+        base["mode"] = _ENGINE.mode
         base["armed_setup"] = bool(_ENGINE.strategy.slot.get("setup"))
     return base
 
@@ -332,6 +393,17 @@ def _engine_idle_reason() -> str:
         return "Trading engine is switched off (BOT_ENGINE=off)."
     if RUNTIME_STATE["kill_switch_triggered"]:
         return "Kill switch engaged: nothing is trading."
+    if _active_strategy() is None:
+        return "No strategy is installed (see the strategies folder), so nothing can trade."
+    if RUNTIME_STATE["live_trading_active"] or (RUNTIME_STATE.get("active_position") or {}).get("mode") == "LIVE":
+        keys = RUNTIME_STATE["bybit_live_keys"]
+        if not RUNTIME_STATE["live_trading_active"]:
+            return "Live trading is paused. A live trade is open and protected by its stop and take-profit orders on Bybit; press Start Live Trading to manage it again."
+        if not (keys["api_key"] and keys["api_secret"]):
+            return "Live trading is on, but no Bybit LIVE API keys are saved, so nothing can trade. Save your live keys."
+        if not _live_unlocked():
+            return "Live trading is locked for this strategy (needs 24h and 20 clean demo trades of its own)."
+        return "Starting the live trading engine..."
     if not RUNTIME_STATE["demo_testing_active"]:
         return "Radar idle. Click 'Start Demo Testing' to begin scanning."
     keys = RUNTIME_STATE["bybit_demo_keys"]
@@ -345,7 +417,7 @@ async def _close_open_position_for_kill() -> str:
     close any open demo trade on Bybit. Returns a short result line."""
     engine = _ENGINE
     await _stop_engine()
-    if engine is None and RUNTIME_STATE["active_position"] and RUNTIME_STATE["bybit_demo_keys"]["api_key"]:
+    if engine is None and RUNTIME_STATE["active_position"] and _keys_for(_engine_mode())["api_key"]:
         engine = _new_engine()
     if engine is None:
         return ""
@@ -419,6 +491,7 @@ async def _cloud_loop(cloud: CloudSync) -> None:
         "start_demo": lambda: start_demo_testing(user="cloud"),
         "stop_demo": lambda: stop_demo_testing(user="cloud"),
         "kill": lambda: trigger_emergency_kill(user="cloud"),
+        "select_strategy": lambda arg: select_strategy(StrategyPayload(strategy_id=str(arg)), user="cloud"),
     }
     loop = asyncio.get_running_loop()
     last_status = last_mirror = float("-inf")
@@ -532,10 +605,12 @@ async def record_live_trade(
     exit_price: float,
     pnl_usd: float,
     pnl_r: float,
+    clean: bool = False,
     strategy: str = DEFAULT_STRATEGY,
 ):
-    """The one place a closed live trade is recorded. The trading engine calls this."""
-    return await record_trade("LIVE", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, strategy=strategy)
+    """The one place a closed live trade is recorded. The trading engine calls this. Live
+    trades never count toward the demo gate, so `clean` is accepted and ignored."""
+    return await record_trade("LIVE", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, clean=False, strategy=strategy)
 
 
 def _persistence_status() -> Dict[str, Any]:
@@ -629,7 +704,7 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
 
 def _build_status() -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
-    active = RUNTIME_STATE["active_strategy"]
+    active = _gate_strategy()
     gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, active), now=now)
 
     RUNTIME_STATE["is_live_trading_unlocked"] = gate.is_unlocked
@@ -685,20 +760,30 @@ def _build_status() -> Dict[str, Any]:
         "cloud": _CLOUD.describe() if _CLOUD else {"configured": False},
         "active_strategy": active,
         "strategies": _strategy_overview(now),
+        "engine_mode": _engine_mode(),
     }
 
 
 def _strategy_overview(now: datetime) -> List[Dict[str, Any]]:
-    """Every strategy with its own results and its own live-unlock progress."""
+    """Every installed strategy with its own results and live-unlock progress, then any removed
+    strategy that still has saved results (shown as not installed, so nothing is hidden)."""
     out = []
-    for item in strategy_catalog():
+    installed = strategy_catalog()
+    removed = sorted(
+        ({t.strategy for t in STATS_TRACKER.trades} | set(RUNTIME_STATE.get("strategy_progress") or {}) | {DEFAULT_STRATEGY})
+        - {item["id"] for item in installed}
+    )
+    removed = [sid for sid in removed if STATS_TRACKER.get_stats("DEMO", sid)["total_trades"]
+               or STATS_TRACKER.get_stats("LIVE", sid)["total_trades"] or get_progress(RUNTIME_STATE, sid)[1]]
+    for item in installed + [{"id": sid, "name": sid, "summary": "Not installed (its file was removed). Saved results are kept."} for sid in removed]:
         sid = item["id"]
         gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, sid), now=now)
         out.append({
             "id": sid,
             "name": item["name"],
             "summary": item["summary"],
-            "active": sid == RUNTIME_STATE["active_strategy"],
+            "active": sid == _active_strategy(),
+            "installed": sid in REGISTRY,
             "demo": STATS_TRACKER.get_stats("DEMO", strategy=sid),
             "live": STATS_TRACKER.get_stats("LIVE", strategy=sid),
             "gate": {
@@ -715,7 +800,7 @@ def _strategy_overview(now: datetime) -> List[Dict[str, Any]]:
 @app.get("/api/strategies")
 async def list_strategies(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     """The strategy list with each one's full rules, plus the selected one."""
-    return {"active": RUNTIME_STATE["active_strategy"], "strategies": strategy_catalog()}
+    return {"active": _active_strategy(), "strategies": strategy_catalog()}
 
 
 class StrategyPayload(BaseModel):
@@ -729,7 +814,7 @@ async def select_strategy(payload: StrategyPayload, user: str = Depends(authenti
     sid = payload.strategy_id
     if sid not in REGISTRY:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown strategy '{sid}'.")
-    if sid == RUNTIME_STATE["active_strategy"]:
+    if sid == _active_strategy():
         return {"status": "SUCCESS", "message": f"{REGISTRY[sid].name} is already selected.", "active": sid}
     if RUNTIME_STATE["active_position"]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
@@ -795,9 +880,15 @@ async def start_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[st
     """
     Starts unrestricted demo strategy testing (NO daily cap).
     """
+    if RUNTIME_STATE["live_trading_active"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Live trading is running. Pause it first: demo and live do not run at the same time.")
+    if (RUNTIME_STATE["active_position"] or {}).get("mode") == "LIVE":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="A live trade is still open. Wait for it to close (or use the kill switch) before starting demo testing.")
     # The 24h clock starts the first time demo testing is started and is not reset by
     # pausing, stopping or restarting.
-    start_clock_if_needed(RUNTIME_STATE, RUNTIME_STATE["active_strategy"])
+    start_clock_if_needed(RUNTIME_STATE, _gate_strategy())
     RUNTIME_STATE["demo_testing_active"] = True
     RUNTIME_STATE["current_mode"] = "DEMO"
     RUNTIME_STATE["is_bot_running"] = True
@@ -822,38 +913,69 @@ async def stop_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[str
     return {"status": "PAUSED", "message": message}
 
 
+def _clear_armed_setups() -> None:
+    """Forget half-built setups when switching between demo and live: a setup seen on one
+    account's session must not trigger a trade on the other."""
+    es = RUNTIME_STATE["engine_state"]
+    es["setup"] = None
+    for slot in (es.get("strategies") or {}).values():
+        if isinstance(slot, dict):
+            slot["setup"] = None
+
+
 @app.post("/api/live/start")
 @app.post("/api/live/enable")
 async def start_live_trading(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     """
-    Starts Live Trading. Strictly locked until demo tests >= 24h and >= 20 clean trades.
-    Strictly enforces 2 trades per day cap.
+    Starts LIVE trading with the selected strategy on the real Bybit account. Locked until
+    that strategy has >= 24h of demo runtime AND >= 20 clean demo trades of its own. At most
+    2 live trades per trading day. Demo testing is paused while live runs.
     """
-    gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, RUNTIME_STATE["active_strategy"]))
+    sid = _gate_strategy()
+    gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, sid))
+    name = REGISTRY[sid].name if sid in REGISTRY else sid
 
     if not gate.is_unlocked:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Live Trading Locked for {REGISTRY[RUNTIME_STATE['active_strategy']].name}! Requires >= 24h demo runtime and >= 20 clean trades of this strategy. "
+            detail=f"Live Trading Locked for {name}! Requires >= 24h demo runtime and >= 20 clean trades of this strategy. "
                    f"Current: {round(gate.elapsed_hours, 1)}h / {gate.clean_trades} trades.",
         )
+    if _active_strategy() is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No strategy is installed.")
+    if (RUNTIME_STATE["active_position"] or {}).get("mode") == "DEMO":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="A demo trade is still open. Wait for it to close before starting live trading.")
 
+    was_demo = RUNTIME_STATE["demo_testing_active"]
+    RUNTIME_STATE["demo_testing_active"] = False   # demo and live never run together
     RUNTIME_STATE["live_trading_active"] = True
     RUNTIME_STATE["current_mode"] = "LIVE"
     RUNTIME_STATE["is_bot_running"] = True
     RUNTIME_STATE["kill_switch_triggered"] = False
+    if was_demo:
+        _clear_armed_setups()
     await save_console_state()
-    return {
-        "status": "SUCCESS",
-        "message": "Live flag set and 2 trades/day cap recorded. Note: automatic live order placement is not built yet, so nothing trades live.",
-    }
+    await sync_engine()
+    message = f"LIVE trading started with {name}. Real money, at most 2 trades per trading day."
+    if was_demo:
+        message += " Demo testing was paused."
+    keys = RUNTIME_STATE["bybit_live_keys"]
+    if not (keys["api_key"] and keys["api_secret"]):
+        message += " No Bybit LIVE API keys are saved yet, so nothing will trade until you save them."
+    return {"status": "SUCCESS", "message": message, "engine": _engine_summary()}
 
 
 @app.post("/api/live/stop")
 async def stop_live_trading(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
     RUNTIME_STATE["live_trading_active"] = False
+    RUNTIME_STATE["current_mode"] = "DEMO"
     await save_console_state()
-    return {"status": "PAUSED", "message": "Live Trading Paused."}
+    await sync_engine()
+    message = "Live Trading Paused."
+    if (RUNTIME_STATE["active_position"] or {}).get("mode") == "LIVE":
+        message += " The open live trade stays protected by its stop and take-profit orders on Bybit and is checked again when you resume."
+    return {"status": "PAUSED", "message": message}
 
 
 @app.post("/api/emergency/kill")

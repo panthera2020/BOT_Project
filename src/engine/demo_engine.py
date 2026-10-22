@@ -25,7 +25,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from src.core.daily_cap import get_trading_day_id
+from src.core.daily_cap import MAX_DAILY_TRADES, get_trading_day_id
 from src.core.exit_policy import ExitActionType, ExitPolicyMonitor, TradeExitPlan, build_trade_exit_plan
 from src.core.models import BTCUSDT_CONFIG, OrderSide, PairConfig, TrendDirection
 from src.core.net_rr_gate import calculate_net_rr
@@ -66,11 +66,17 @@ class DemoEngine:
         position_poll_seconds: float = 5.0,
         setup_window_minutes: int = 60,
         strategy_id: str = DEFAULT_STRATEGY,
+        mode: str = "DEMO",
+        max_daily_trades: int = MAX_DAILY_TRADES,
     ):
         self.exchange = exchange
         self.state = state
         self.persist = persist
         self.record_trade = record_trade
+        if mode.upper() not in ("DEMO", "LIVE"):
+            raise ValueError(f"unknown mode {mode!r}")
+        self.mode = mode.upper()        # "LIVE" trades the real Bybit account; everything else is identical
+        self.max_daily_trades = max_daily_trades   # applies to LIVE only (the demo has no cap)
         self.notify = notify
         self.config = config
         self.symbol = config.symbol
@@ -95,7 +101,9 @@ class DemoEngine:
             raise ValueError(f"unknown strategy {strategy_id!r}")
         self.strategy_id = strategy_id
         # setup_window_minutes only applies to the original sweep strategy (kept for compatibility)
-        self.strategy = REGISTRY[strategy_id](self, window_minutes=setup_window_minutes) if strategy_id == DEFAULT_STRATEGY else REGISTRY[strategy_id](self)
+        self.strategy = REGISTRY[strategy_id](self)
+        if strategy_id == DEFAULT_STRATEGY and hasattr(self.strategy, "window_minutes"):
+            self.strategy.window_minutes = setup_window_minutes
 
     # ------------------------------------------------------------------ plumbing
     @property
@@ -105,7 +113,7 @@ class DemoEngine:
     async def _alert(self, title: str, body: str, level: str = "INFO") -> None:
         if self.notify:
             try:
-                await self.notify(title, body, level)
+                await self.notify(title, ("[LIVE] " + body) if self.mode == "LIVE" else body, level)
             except Exception as exc:  # an alert problem must never stop trading logic
                 logger.warning("Alert failed: %s", exc)
 
@@ -119,7 +127,7 @@ class DemoEngine:
     async def run(self) -> None:
         """Loop until asked to stop. Errors (network, Bybit) are logged and retried with
         a growing pause; they never end the loop."""
-        logger.info("Demo engine started for %s", self.symbol)
+        logger.info("%s engine started for %s (%s)", self.mode.title(), self.symbol, self.strategy_id)
         while not self._stop:
             delay = self.position_poll_seconds if self.state.get("active_position") else self.poll_seconds
             try:
@@ -142,7 +150,7 @@ class DemoEngine:
                     self._error_alerted = True
                     await self._alert("ENGINE_ERRORS", f"{self.consecutive_errors} failures in a row: {self.status['last_error']}", "WARNING")
             await self._sleep(delay)
-        logger.info("Demo engine stopped")
+        logger.info("%s engine stopped", self.mode.title())
 
     async def tick(self) -> None:
         now = self._now()
@@ -163,6 +171,11 @@ class DemoEngine:
             return
 
         day = get_trading_day_id(now)
+        # Demo and live accounts hold very different money: never size a live trade from the
+        # demo account's starting capital (or the reverse). Older saved state had demo only.
+        if self.es.get("capital_mode", "DEMO") != self.mode:
+            self.es["day"], self.es["day_start_capital"] = "", 0.0
+        self.es["capital_mode"] = self.mode
         if self.es["day"] != day or not self.es["day_start_capital"]:
             self.es["day"], self.es["day_start_capital"] = day, equity
             await self.persist()
@@ -224,6 +237,13 @@ class DemoEngine:
             self._decide(f"trigger skipped: needs {sizing.notional / leverage:.2f} margin at {leverage}x, equity {equity:.2f}")
             return
 
+        if self.mode == "LIVE":
+            cap = self.es.get("live_cap") or {}
+            taken = cap.get("count", 0) if cap.get("day") == get_trading_day_id(now) else 0
+            if taken >= self.max_daily_trades:
+                self._decide(f"trigger skipped: live daily cap reached ({taken}/{self.max_daily_trades} trades today)")
+                return
+
         if not await self.exchange.set_leverage(self.symbol, leverage):
             self._decide("trigger skipped: Bybit refused the leverage change")
             return
@@ -253,7 +273,7 @@ class DemoEngine:
         plan = build_trade_exit_plan(order_side, filled_entry, stop, filled_qty, self.config)
         tick = self.config.tick_size
         record = {
-            "mode": "DEMO", "symbol": self.symbol, "side": side, "qty": filled_qty,
+            "mode": self.mode, "symbol": self.symbol, "side": side, "qty": filled_qty,
             "entry_price": filled_entry, "stop_price": stop, "initial_stop_price": stop,
             # Bybit rejects prices that are not on the tick grid, so the plan's 2-decimal prices are rounded to it
             "tp1_price": market.round_to_tick(plan.tp1_price, tick), "tp2_price": market.round_to_tick(plan.tp2_price, tick),
@@ -264,6 +284,10 @@ class DemoEngine:
             "trend": self.status["trend"], "strategy": self.strategy_id, "unclean": False, "close_reason": None, "finalize_attempts": 0,
         }
         self.state["active_position"] = record
+        if self.mode == "LIVE":   # a live entry uses up one of the day's trades, whatever its result
+            day = get_trading_day_id(now)
+            cap = self.es.get("live_cap") or {}
+            self.es["live_cap"] = {"day": day, "count": (cap.get("count", 0) if cap.get("day") == day else 0) + 1}
         await self.persist()  # saved BEFORE the take-profits go out, so a crash cannot lose track of the trade
 
         problem = None

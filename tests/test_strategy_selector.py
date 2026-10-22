@@ -267,6 +267,14 @@ async def test_a_database_made_before_the_strategy_column_is_upgraded_in_place(t
 def test_damaged_selection_is_skipped_and_reported():
     from src.core.console_state import restore_plain
     state = {"telegram_config": {"chat_id": ""}}
-    problems = restore_plain(state, {"active_strategy": "nope", "strategy_progress": {"trend_pullback": {"clean": -2}, "zzz": {}}})
+    problems = restore_plain(state, {"active_strategy": 5, "strategy_progress": {"trend_pullback": {"clean": -2}, "zzz": "garbage"}})
     assert len(problems) == 3 and "active_strategy" not in state
     assert state["strategy_progress"] == {}
+
+
+def test_progress_of_a_strategy_that_is_not_installed_is_kept():
+    from src.core.console_state import restore_plain, snapshot_plain
+    state = {"telegram_config": {"chat_id": ""}}
+    data = {"active_strategy": "gone", "strategy_progress": {"gone": {"start": NOW.isoformat(), "clean": 9}}}
+    assert restore_plain(state, data) == []
+    assert state["active_strategy"] == "gone" and state["strategy_progress"]["gone"] == {"start": NOW, "clean": 9}

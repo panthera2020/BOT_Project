@@ -20,6 +20,7 @@ from src.strategy.strategy1 import Strategy1StateMachine
 
 class SweepReversal(Strategy):
     id = "sweep_reversal"
+    order = 10
     name = "Liquidity sweep reversal"
     summary = "15m sweep of a swing low/high, then 3 confirming 2m candles. Needs the 1h and 15m trends to be Up or Down."
     rules = [
@@ -147,6 +148,7 @@ class SweepReversal(Strategy):
 
 class SweepReversalLoose(SweepReversal):
     id = "sweep_reversal_loose"
+    order = 20
     name = "Liquidity sweep reversal (looser)"
     summary = "Same idea as strategy 1 with three looser settings, so it fires more often. A separate strategy: the original is untouched."
     rules = [

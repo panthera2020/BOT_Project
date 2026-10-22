@@ -57,6 +57,7 @@ def evaluate_session(c15: List[Candle], buffer: float, done: set) -> Tuple[Optio
 
 class SessionBreakout(Strategy):
     id = "session_breakout"
+    order = 50
     name = "Session open breakout"
     summary = "First 15m close beyond the opening hour's range of the London (08:00 UTC) or New York (14:30 UTC) session."
     rules = [

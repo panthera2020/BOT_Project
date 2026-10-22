@@ -166,7 +166,7 @@ def test_commands_require_login(remote):
     assert fake.tables["bot_commands"] == []
 
 
-@pytest.mark.parametrize("path", ["/api/keys", "/api/telegram", "/api/telegram/test", "/api/live/start", "/api/live/stop", "/api/live/enable", "/api/strategy"])
+@pytest.mark.parametrize("path", ["/api/keys", "/api/telegram", "/api/telegram/test", "/api/live/start", "/api/live/stop", "/api/live/enable"])
 def test_secrets_and_live_controls_stay_on_the_phone(remote, path):
     fake, c = remote
     r = c.post(path, auth=AUTH, json={"account_type": "demo", "api_key": "K", "api_secret": "S"})
@@ -179,3 +179,50 @@ def test_strategy_rules_are_served_without_asking_the_phone(remote):
     data = c.get("/api/strategies", auth=AUTH).json()
     assert len(data["strategies"]) == 6 and fake.requests == []
     assert c.get("/api/strategies").status_code == 401
+
+
+def test_strategy_switch_is_sent_to_the_phone_with_its_id(remote):
+    fake, c = remote
+    phone_reports(fake)
+    import threading, time
+
+    def run():
+        for _ in range(100):
+            time.sleep(0.01)
+            if fake.tables["bot_commands"]:
+                fake.tables["bot_commands"][0].update(status="done", result="Switched to Trend pullback.")
+                return
+    t = threading.Thread(target=run)
+    t.start()
+    r = c.post("/api/strategy", auth=AUTH, json={"strategy_id": "trend_pullback"})
+    t.join()
+    assert r.status_code == 200 and r.json()["message"] == "Switched to Trend pullback."
+    assert fake.tables["bot_commands"][0]["command"] == "select_strategy" and fake.tables["bot_commands"][0]["arg"] == "trend_pullback"
+
+
+def test_strategy_switch_refused_by_the_phone_is_reported(remote):
+    fake, c = remote
+    phone_reports(fake)
+    import threading, time
+
+    def run():
+        for _ in range(100):
+            time.sleep(0.01)
+            if fake.tables["bot_commands"]:
+                fake.tables["bot_commands"][0].update(status="error", result="HTTPException: A trade is open.")
+                return
+    t = threading.Thread(target=run)
+    t.start()
+    r = c.post("/api/strategy", auth=AUTH, json={"strategy_id": "range_reversion"})
+    t.join()
+    assert r.status_code == 409 and "trade is open" in r.json()["detail"]
+
+
+def test_strategy_switch_offline_is_queued_and_junk_ids_are_refused(remote):
+    fake, c = remote
+    phone_reports(fake, 900)
+    assert c.post("/api/strategy", auth=AUTH, json={"strategy_id": "range_reversion"}).json()["status"] == "QUEUED"
+    for bad in ("", "Has Space", "x" * 80, "a;drop", "../etc"):
+        assert c.post("/api/strategy", auth=AUTH, json={"strategy_id": bad}).status_code == 400
+    assert len(fake.tables["bot_commands"]) == 1
+    assert c.post("/api/strategy", json={"strategy_id": "trend_pullback"}).status_code == 401

@@ -15,7 +15,7 @@ from src.remote.supabase import SupabaseClient
 
 logger = logging.getLogger("CloudSync")
 
-COMMANDS = ("start_demo", "stop_demo", "kill")
+COMMANDS = ("start_demo", "stop_demo", "kill", "select_strategy")
 # A "start" that sat unseen for this long is dropped: the person pressed it minutes ago and
 # probably forgot. Stop and kill are safe to run late, so they never expire.
 START_EXPIRES_SECONDS = 120
@@ -127,8 +127,10 @@ class CloudSync:
         return {"state": state, "trades": [r["data"] for r in trade_rows if isinstance(r.get("data"), dict)]}
 
     # ------------------------------------------------------------------ commands
-    async def run_pending_commands(self, handlers: Dict[str, Callable[[], Awaitable[Any]]]) -> int:
-        """Run every pending command in the order pressed. Returns how many were handled."""
+    async def run_pending_commands(self, handlers: Dict[str, Callable[..., Awaitable[Any]]]) -> int:
+        """Run every pending command in the order pressed. Returns how many were handled. A
+        command may carry an argument (select_strategy: the strategy id); the handler receives
+        it as its only argument."""
         try:
             pending = await self.client.select("bot_commands", {"status": "eq.pending", "order": "id.asc", "limit": "10"})
         except Exception as exc:
@@ -147,7 +149,8 @@ class CloudSync:
                 status, result = "expired", "Start was not picked up in time (phone offline?). Press it again."
             else:
                 try:
-                    out = await handlers[cmd]()
+                    arg = row.get("arg")
+                    out = await (handlers[cmd](arg) if arg is not None else handlers[cmd]())
                     result = str(out.get("message", "")) if isinstance(out, dict) else str(out or "")
                 except Exception as exc:
                     status, result = "error", f"{type(exc).__name__}: {getattr(exc, 'detail', exc)}"[:300]

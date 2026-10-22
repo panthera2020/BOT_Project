@@ -32,6 +32,7 @@ class Entry:
 
 class Strategy:
     id: str = ""
+    order: int = 100          # position in the dashboard list (lower first); ties by id
     name: str = ""
     summary: str = ""
     rules: List[str] = []

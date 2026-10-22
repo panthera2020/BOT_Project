@@ -54,6 +54,7 @@ def check_retest(setup: dict, candle: Candle, buffer: float) -> Tuple[str, Optio
 
 class BreakoutRetest(Strategy):
     id = "breakout_retest"
+    order = 40
     name = "Breakout and retest"
     summary = "A 15m close beyond the 20-candle high/low, then a retest of the broken level that holds."
     rules = [

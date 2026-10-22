@@ -13,7 +13,8 @@ create table if not exists public.bot_status (
 -- Buttons pressed on the Vercel dashboard. The phone polls for pending ones and runs them.
 create table if not exists public.bot_commands (
   id          bigint generated always as identity primary key,
-  command     text not null check (command in ('start_demo', 'stop_demo', 'kill')),
+  command     text not null check (command in ('start_demo', 'stop_demo', 'kill', 'select_strategy')),
+  arg         text,
   status      text not null default 'pending' check (status in ('pending', 'done', 'error', 'expired')),
   result      text,
   created_at  timestamptz not null default now(),

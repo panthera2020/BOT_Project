@@ -45,6 +45,7 @@ def pullback_signal(c15: List[Candle], macro: TrendDirection, buffer: float) -> 
 
 class TrendPullback(Strategy):
     id = "trend_pullback"
+    order = 30
     name = "Trend pullback"
     summary = "Buy a dip to the 15m EMA20 inside a 1h uptrend; sell a rally to it inside a 1h downtrend."
     rules = [
