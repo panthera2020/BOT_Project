@@ -28,5 +28,7 @@ def fresh_console_gate_state():
     RUNTIME_STATE["current_mode"] = "DEMO"
     RUNTIME_STATE["active_position"] = None
     RUNTIME_STATE["engine_state"] = {}
+    RUNTIME_STATE["active_strategy"] = "sweep_reversal"
+    RUNTIME_STATE["strategy_progress"] = {}
     STATS_TRACKER.restore_trades([])
     yield

@@ -32,12 +32,16 @@ def fresh_state():
         "active_position": None,
         "telegram_config": {"bot_token": "", "chat_id": ""},
         "engine_state": {},
+        "active_strategy": "sweep_reversal",
+        "strategy_progress": {},
     }
 
 
 def busy_state():
     s = fresh_state()
     s.update(
+        active_strategy="trend_pullback",
+        strategy_progress={"trend_pullback": {"start": NOW - timedelta(hours=2), "clean": 3}},
         demo_testing_active=True,
         demo_run_start_time=NOW - timedelta(hours=5),
         clean_demo_trade_count=7,

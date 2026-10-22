@@ -14,9 +14,16 @@ allowed to start running again on its own.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.core.strategy_progress import DEFAULT_STRATEGY
+
 SNAPSHOT_VERSION = 1
 _MODES = {"DEMO", "LIVE"}
 _BOOL_FLAGS = ("is_bot_running", "demo_testing_active", "live_trading_active", "kill_switch_triggered")
+
+
+def known_strategies() -> set:
+    from src.engine.strategies import REGISTRY  # imported late: the engine package is heavier than this module
+    return set(REGISTRY)
 
 
 def snapshot_plain(state: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -28,6 +35,11 @@ def snapshot_plain(state: Dict[str, Any], now: Optional[datetime] = None) -> Dic
         "flags": {name: bool(state[name]) for name in _BOOL_FLAGS} | {"current_mode": state["current_mode"]},
         "demo_run_start_time": started.isoformat() if started else None,
         "clean_demo_trade_count": int(state["clean_demo_trade_count"]),
+        "active_strategy": state.get("active_strategy", DEFAULT_STRATEGY),
+        "strategy_progress": {
+            sid: {"start": p["start"].isoformat() if p.get("start") else None, "clean": int(p.get("clean", 0))}
+            for sid, p in (state.get("strategy_progress") or {}).items()
+        },
         "active_position": state.get("active_position"),
         "engine_state": state.get("engine_state") or {},
         "telegram_chat_id": state["telegram_config"]["chat_id"],
@@ -88,6 +100,36 @@ def restore_plain(state: Dict[str, Any], data: Any) -> List[str]:
             state["clean_demo_trade_count"] = count
         else:
             problems.append("clean_demo_trade_count is invalid; ignored")
+
+    chosen = data.get("active_strategy")
+    if chosen is not None:
+        if isinstance(chosen, str) and chosen in known_strategies():
+            state["active_strategy"] = chosen
+        else:
+            problems.append("active_strategy is not a known strategy; keeping the default")
+
+    progress = data.get("strategy_progress")
+    if progress is not None:
+        if isinstance(progress, dict):
+            restored: Dict[str, Any] = {}
+            for sid, item in progress.items():
+                ok = sid in known_strategies() and isinstance(item, dict)
+                clean = item.get("clean", 0) if ok else None
+                if not (ok and isinstance(clean, int) and not isinstance(clean, bool) and clean >= 0):
+                    problems.append(f"progress of strategy {sid!r} is invalid; ignored")
+                    continue
+                start = None
+                if item.get("start"):
+                    try:
+                        start = datetime.fromisoformat(item["start"])
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=timezone.utc)
+                    except (TypeError, ValueError):
+                        problems.append(f"start time of strategy {sid!r} is invalid; ignored")
+                restored[sid] = {"start": start, "clean": clean}
+            state["strategy_progress"] = restored
+        else:
+            problems.append("strategy_progress is invalid; ignored")
 
     if "active_position" in data:
         position = data["active_position"]

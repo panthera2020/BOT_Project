@@ -15,9 +15,10 @@ K = 204000.0  # mirror constant in sim_exchange.mirror
 
 
 class Harness:
-    def __init__(self, side="Buy", markets=None, balance=1000.0, mirror_markets=None):
+    def __init__(self, side="Buy", markets=None, balance=1000.0, mirror_markets=None, strategy_id="sweep_reversal", now=None):
         self.side = side
-        self.clock = Clock()
+        self.strategy_id = strategy_id
+        self.clock = Clock(now) if now else Clock()
         markets = markets or default_markets()
         flip = (side == "Sell") if mirror_markets is None else mirror_markets
         self.sim = SimExchange(balance=balance, markets=mirror(markets) if flip else markets, clock=self.clock)
@@ -31,14 +32,14 @@ class Harness:
         async def persist():
             self.persisted += 1
 
-        async def record(symbol, side, qty, entry, exit_, pnl, r, clean=True):
-            self.trades.append(dict(symbol=symbol, side=side, qty=qty, entry=entry, exit=exit_, pnl=pnl, r=r, clean=clean))
+        async def record(symbol, side, qty, entry, exit_, pnl, r, clean=True, strategy=None):
+            self.trades.append(dict(symbol=symbol, side=side, qty=qty, entry=entry, exit=exit_, pnl=pnl, r=r, clean=clean, strategy=strategy))
             return self.trades[-1]
 
         async def notify(title, body, level):
             self.alerts.append(title)
 
-        return DemoEngine(self.sim, self.state, persist, record, notify, now_fn=self.clock.now, sleep=self.clock.sleep)
+        return DemoEngine(self.sim, self.state, persist, record, notify, now_fn=self.clock.now, sleep=self.clock.sleep, strategy_id=self.strategy_id)
 
     def restart(self):
         """A restart: state goes through JSON (as the saved file does) into a brand-new engine."""

@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
+from src.engine.strategies import strategy_catalog
 from src.remote.supabase import SupabaseClient, SupabaseError, config_from_env
 
 DEFAULT_ADMIN_PASS = "P@ssword123!"
@@ -172,6 +173,17 @@ async def kill(user: str = Depends(authenticate)) -> Dict[str, Any]:
 
 def _phone_only(what: str) -> HTTPException:
     return HTTPException(status_code=403, detail=f"{what} is only available on the phone console (keys never pass through the cloud).")
+
+
+@app.get("/api/strategies")
+async def strategies(user: str = Depends(authenticate)) -> Dict[str, Any]:
+    """The rules text is fixed in the code, so this needs no round trip to the phone."""
+    return {"active": None, "strategies": strategy_catalog()}
+
+
+@app.post("/api/strategy")
+async def switch_strategy(user: str = Depends(authenticate)):
+    raise _phone_only("Switching strategy")
 
 
 @app.post("/api/keys")

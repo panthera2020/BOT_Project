@@ -1,4 +1,4 @@
-# Handoff and Status (v1.9, 2026-10-20)
+# Handoff and Status (v2.0, 2026-10-22)
 
 **Update this file every time the work changes, and prepare a fresh copy whenever usage is about to run out.**
 
@@ -13,9 +13,10 @@
 - v1.6 makes the phone (or any always-on device) the home of the state: `scripts/run_on_phone.sh` keeps the state file on the device, restarts the app within seconds if it dies and the restarted app loads the last save; `src/tools/backup_state.py` makes verified backup copies and restores them; the dashboard has a **Saved State** card (saving on/off, last save time, what was restored, warnings). The hosted web version is unchanged and still works (below).
 - v1.7 adds the demo engine (`src/engine/`), exchange-side stop and take-profits, closed-trade recording that feeds the demo gate, kill switch that closes the trade on Bybit, and an honest radar on the dashboard. The Bybit adapter now raises on errors instead of returning empty results.
 - v1.8 adds the **short side** and fixes two faults in v1.7: it did not follow the PRD trend table (a long could be taken when the 15m trend was Down), and take-profit / breakeven prices were not rounded to Bybit's 0.1 tick, which Bybit would have rejected. Saved setups from v1.7 (no side) are read as long.
+- v2.0 adds the **strategy selector** (section 4b): six strategies, switchable on the phone dashboard, each with its own results, 24h clock, 20-trade count and live unlock. The original strategy's rules are unchanged (its 53 engine tests pass untouched). Never run against the real Bybit; the new strategies' rules are my interpretations (section 4b).
 - v1.9.1: the Bybit adapter now measures the gap between the device clock and Bybit's (`/v5/market/time`) and stamps requests with Bybit's time; on error 10002 it re-measures and retries once. A phone clock 1s fast had made every signed call fail (`tests/test_bybit_clock.py`). Still never run against real Bybit.
 - v1.9 adds the **Supabase link and the Vercel remote dashboard** (section 5b). The engine still runs only on the phone. Supabase holds a copy of the phone's state and trades and a mailbox for commands; the Vercel page shows the phone's latest status and sends Start / Pause / Kill to it. **None of this was run against real Supabase or Vercel** (the build workspace cannot reach them); it was tested against an in-memory imitation of Supabase's REST API (`tests/fake_supabase.py`).
-- Tests (v1.8 figures; v1.9 now has 241 passing with `cryptography`, 228 + 13 skipped without it): `pytest -q` gave 188 passed with the `cryptography` package installed, and 175 passed + 13 skipped (skips are the encryption-dependent tests, with a visible reason) without it. Run in several test orders. A real server was also killed with `kill -9` and restarted: demo state, clock, 21 trades, keys and Telegram settings came back, no secret was readable on disk, and live trading did not restart by itself. The page was driven end to end in a simulated browser (jsdom: sign-in, start demo, save keys, kill switch, and again after `kill -9`), but **not in a real browser**. The launcher was tested on Linux (hard kill, restart, state reload, backups, refusing weak passwords); **it has not been run on a real Android phone or in Termux**.
+- Tests (v1.8 figures; v2.0 has 318 passing with `cryptography`, 305 + 13 skipped without it, 299 + 13 skipped on the phone's pydantic 1 stack excluding the launcher tests): `pytest -q` gave 188 passed with the `cryptography` package installed, and 175 passed + 13 skipped (skips are the encryption-dependent tests, with a visible reason) without it. Run in several test orders. A real server was also killed with `kill -9` and restarted: demo state, clock, 21 trades, keys and Telegram settings came back, no secret was readable on disk, and live trading did not restart by itself. The page was driven end to end in a simulated browser (jsdom: sign-in, start demo, save keys, kill switch, and again after `kill -9`), but **not in a real browser**. The launcher was tested on Linux (hard kill, restart, state reload, backups, refusing weak passwords); **it has not been run on a real Android phone or in Termux**.
 - Hosted web version: checked by running the Dockerfile's command with `DATABASE_URL` unset: `/` and `/health` return 200 and the console shows "Saving is OFF". On a host with an ephemeral disk the state is lost on redeploy, as before. The Dockerfile sets `DATABASE_URL=/data/trading_bot.db`; that only persists if `/data` is a persistent volume.
 
 ## 2. What exists in the code
@@ -77,6 +78,28 @@ Not built yet: the bot wallet ledger and 24-hour withdrawal lock, a backtest run
   - The file only survives restarts if it sits on storage that survives restarts. On Back4app and Render free tiers the filesystem is wiped on redeploy or restart, so this does not help there (section 5).
   - Not done: API keys are held unencrypted in memory while the app runs; 
 - The made-up seed trade was removed in v1.5, so stats only show real trades.
+
+## 4b. Strategy selector (v2.0)
+
+The engine runs one strategy at a time, chosen in the dashboard's **Strategy** card (or `POST /api/strategy`). Switching is refused while a trade is open or live is running, restarts the engine on the new strategy if demo is running, and never resets any strategy's results. The strategies are in `src/engine/strategies/` (add a class to `STRATEGY_CLASSES` in `__init__.py` and it appears in the list):
+
+| id | Strategy | Needs |
+|---|---|---|
+| `sweep_reversal` | Liquidity sweep reversal: **the original, rule for rule** | 1h and 15m trend not Range |
+| `sweep_reversal_loose` | Same idea, separate strategy: 3-candle swings, 15m trend alone picks the side, 1h Range allowed (half risk), 120 min trigger window | 15m trend not Range |
+| `trend_pullback` | Bounce off the 15m EMA20 inside a 1h trend (EMA20 vs EMA50 must agree); stop = lowest/highest of last 5 candles -/+ 15 | 1h trend not Range |
+| `breakout_retest` | 15m close beyond the prior 20-candle high/low, then a retest that holds within 8 candles; stop = retest candle extreme -/+ 15 | 1h trend must not oppose |
+| `session_breakout` | First 15m close beyond the opening hour's range at London 08:00 / New York 14:30 **UTC** (no daylight saving), within 3 hours, one trade per session; stop = other side of the range -/+ 15 | none |
+| `range_reversion` | 15m trend Range; candle pierces the Bollinger(20,2) band, closes back inside, bullish/bearish, RSI(14) <= 35 / >= 65; stop = candle extreme -/+ 15 | 15m Range |
+
+**Same gates for all (in `DemoEngine._enter`):** capital and leverage tiers, position sizing, net RR >= 2, 90% margin limit, stop on Bybit with the order, TP1 70% at 3R and TP2 at 5R on Bybit, breakeven at 1.5R, early exit on a 50% giveback, kill switch, and the demo gate (24h AND 20 clean trades) **per strategy**. Risk: the original uses the PRD trend table exactly (Range stands down, half risk when 1h and 15m disagree). `trend_pullback`, `breakout_retest` and the loose sweep take full risk when the 1h and 15m trends agree and half otherwise; `session_breakout` and `range_reversion` take full risk. The original strategy's progress is still the saved `demo_run_start_time` / `clean_demo_trade_count`; the others are in `strategy_progress`. Every trade is stored with its strategy (`trade_history.strategy`, added to older files automatically, defaulting to the original).
+
+Things to know:
+- **All the new rules are my interpretations**, not the PRD's. They are plain and easy to change in the strategy files, but none has been tested against real data, and none is known to be profitable.
+- **The shared net-RR gate is strict for tight stops.** With the PRD's slippage and fee model, a stop under roughly $300 on BTC often fails "NET_RR_BELOW_GATE", so the candle-based strategies (small stops) will skip many signals. It shows in "Last decision". Whether to relax this is a decision for you, not something I changed.
+- The 3R/5R exit plan is the same for all, which suits trend strategies better than `range_reversion`.
+- The Vercel remote page shows the selector read-only ("switch on the phone"); switching needs the phone console, because the Supabase command table only knows start / stop / kill.
+- Tests: `tests/test_strategies.py` (rules on hand-built candles, risk modes, each strategy end to end on the simulated Bybit), `tests/test_strategy_selector.py` (selection, per-strategy results and gate, saving, database upgrade). The dashboard was driven in a simulated browser (select, switch, results table), not a real one.
 
 ## 5. Hosting
 

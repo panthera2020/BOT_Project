@@ -80,9 +80,16 @@ class StateStore:
                     pnl_r REAL NOT NULL,
                     is_win INTEGER NOT NULL,
                     status TEXT NOT NULL,
-                    timestamp TEXT NOT NULL
+                    timestamp TEXT NOT NULL,
+                    strategy TEXT NOT NULL DEFAULT 'sweep_reversal'
                 );
             """)
+            # Files saved before the strategy selector have no strategy column: add it. Their
+            # trades were all taken by the original strategy, which is the column's default.
+            async with db.execute("PRAGMA table_info(trade_history)") as cursor:
+                columns = {row[1] for row in await cursor.fetchall()}
+            if "strategy" not in columns:
+                await db.execute("ALTER TABLE trade_history ADD COLUMN strategy TEXT NOT NULL DEFAULT 'sweep_reversal'")
 
             # 24-hour withdrawal lock requests
             await db.execute("""
@@ -130,12 +137,13 @@ class StateStore:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO trade_history "
-                "(id, mode, symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, is_win, status, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, mode, symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, is_win, status, timestamp, strategy) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     trade["id"], trade["mode"], trade["symbol"], trade["side"], trade["qty"],
                     trade["entry_price"], trade["exit_price"], trade["pnl_usd"], trade["pnl_r"],
                     1 if trade["is_win"] else 0, trade["status"], trade["timestamp"],
+                    trade.get("strategy") or "sweep_reversal",
                 ),
             )
             for key, value in (state_items or {}).items():

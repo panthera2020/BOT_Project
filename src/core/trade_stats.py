@@ -3,7 +3,7 @@ Unified Trade Records & Live/Demo Statistics Service.
 Computes total trades, profit/loss (PnL in USDT & R), win rate, and trade histories.
 """
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
 
@@ -21,6 +21,7 @@ class TradeRecord:
     is_win: bool
     status: str        # "CLOSED", "OPEN"
     timestamp: str
+    strategy: str = "sweep_reversal"  # which strategy took the trade
 
 
 class TradeStatsTracker:
@@ -38,6 +39,7 @@ class TradeStatsTracker:
         exit_price: float,
         pnl_usd: float,
         pnl_r: float,
+        strategy: str = "sweep_reversal",
     ) -> TradeRecord:
         is_win = pnl_usd > 0
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -54,6 +56,7 @@ class TradeStatsTracker:
             is_win=is_win,
             status="CLOSED",
             timestamp=now_str,
+            strategy=strategy,
         )
         self.trades.insert(0, trade)  # newest first
         self._next_id += 1
@@ -67,17 +70,15 @@ class TradeStatsTracker:
         self.trades = restored
         self._next_id = (restored[0].id + 1) if restored else 1
 
-    def get_stats(self, mode: str) -> Dict[str, Any]:
-        filtered = [t for t in self.trades if t.mode == mode.upper()]
+    def get_stats(self, mode: str, strategy: Optional[str] = None) -> Dict[str, Any]:
+        """Results for one mode, optionally for one strategy only."""
+        filtered = [t for t in self.trades if t.mode == mode.upper() and (strategy is None or t.strategy == strategy)]
         total_trades = len(filtered)
         if total_trades == 0:
             return {
-                "total_trades": 0,
-                "wins": 0,
-                "losses": 0,
-                "win_rate": 0.0,
-                "total_pnl_usd": 0.0,
-                "total_pnl_r": 0.0,
+                "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+                "total_pnl_usd": 0.0, "total_pnl_r": 0.0,
+                "expectancy_r": 0.0, "profit_factor": None, "max_drawdown_r": 0.0,
             }
 
         wins = sum(1 for t in filtered if t.is_win)
@@ -85,6 +86,14 @@ class TradeStatsTracker:
         win_rate = round((wins / total_trades) * 100.0, 1)
         total_pnl_usd = round(sum(t.pnl_usd for t in filtered), 2)
         total_pnl_r = round(sum(t.pnl_r for t in filtered), 2)
+        gross_win = sum(t.pnl_usd for t in filtered if t.pnl_usd > 0)
+        gross_loss = -sum(t.pnl_usd for t in filtered if t.pnl_usd < 0)
+        # worst peak-to-trough fall of the running R total, oldest trade first
+        running = peak = worst = 0.0
+        for t in sorted(filtered, key=lambda t: t.id):
+            running += t.pnl_r
+            peak = max(peak, running)
+            worst = max(worst, peak - running)
 
         return {
             "total_trades": total_trades,
@@ -93,6 +102,9 @@ class TradeStatsTracker:
             "win_rate": win_rate,
             "total_pnl_usd": total_pnl_usd,
             "total_pnl_r": total_pnl_r,
+            "expectancy_r": round(total_pnl_r / total_trades, 2),   # average R per trade
+            "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else None,  # None: no losing trade yet
+            "max_drawdown_r": round(worst, 2),
         }
 
     def get_recent_trades(self, limit: int = 15) -> List[Dict[str, Any]]:
@@ -109,6 +121,7 @@ class TradeStatsTracker:
                 "pnl_r": t.pnl_r,
                 "is_win": t.is_win,
                 "timestamp": t.timestamp,
+                "strategy": t.strategy,
             }
             for t in self.trades[:limit]
         ]

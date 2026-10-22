@@ -137,6 +137,26 @@
       </div>
     </header>
 
+    <!-- Strategy selector and side-by-side results -->
+    <div class="card" id="strategyCard" style="display:none;">
+      <h3>🎯 Strategy</h3>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <select id="strategySelect" onchange="selectStrategy(this.value)" style="flex:1; min-width:220px; padding:10px; border-radius:8px; background:#0b1220; color:#f3f4f6; border:1px solid var(--card-border); font-size:14px;"></select>
+        <span id="strategyNote" style="font-size:11px; color:var(--text-muted);"></span>
+      </div>
+      <p id="strategySummary" style="font-size:12px; color:var(--text-muted); margin:10px 0 4px;"></p>
+      <ul id="strategyRules" style="font-size:12px; margin:0 0 12px 18px; padding:0; color:#d1d5db;"></ul>
+      <div style="overflow-x:auto;">
+        <table style="min-width:640px;">
+          <thead><tr>
+            <th>Strategy</th><th>Demo trades</th><th>Win rate</th><th>Avg R / trade</th><th>Profit factor</th><th>Total R</th><th>Max drawdown</th><th>Live unlock (24h + 20 trades)</th>
+          </tr></thead>
+          <tbody id="strategyTableBody"></tbody>
+        </table>
+      </div>
+      <p style="font-size:11px; color:var(--text-muted); margin-top:8px;">Each strategy keeps its own results, its own 24-hour clock and its own 20-trade count. Switching never resets any of them, and a strategy unlocks live trading only on its own results. A trade must be closed before you can switch.</p>
+    </div>
+
     <!-- Master Execution Controls -->
     <div class="controls-bar">
       <!-- Demo Test Control Box -->
@@ -146,7 +166,7 @@
           <span style="font-size: 11px; background: rgba(59, 130, 246, 0.2); color: #60a5fa; padding: 3px 8px; border-radius: 4px;">NO Daily Cap</span>
         </div>
         <p style="font-size: 12px; color: var(--text-muted);">
-          Runs Strategy 1 on Bybit Demo with unlimited daily setups to verify raw performance and win rate.
+          Runs <b id="activeStrategyName">the selected strategy</b> on Bybit Demo with unlimited daily setups to verify raw performance and win rate.
         </p>
         <div style="display: flex; gap: 10px; margin-top: 4px;">
           <button id="btnStartDemo" class="btn btn-primary" onclick="toggleDemo(true)">▶ Start Demo Testing</button>
@@ -344,6 +364,7 @@
             <tr>
               <th>ID</th>
               <th>Mode</th>
+              <th>Strategy</th>
               <th>Side</th>
               <th>Qty</th>
               <th>Entry Price</th>
@@ -355,7 +376,7 @@
           </thead>
           <tbody id="tradeHistoryBody">
             <tr>
-              <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 16px;">
+              <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 16px;">
                 No trades recorded yet. Start Demo Testing above to begin taking setups.
               </td>
             </tr>
@@ -514,6 +535,80 @@
       fillList("persistNotes", p.notes, "");
     }
 
+    function esc(text) {
+      return String(text == null ? "" : text).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+    }
+
+    let strategyNames = {};
+    let strategyRules = {};
+    let rulesLoaded = false;
+    function strategyName(id) { return strategyNames[id] || id || "Liquidity sweep reversal"; }
+
+    async function loadStrategyRules() {
+      if (rulesLoaded) return;
+      try {
+        const res = await authFetch("/api/strategies");
+        if (!res.ok) return;
+        const d = await res.json();
+        d.strategies.forEach(s => { strategyRules[s.id] = s.rules; });
+        rulesLoaded = true;
+      } catch (e) {}
+    }
+
+    function renderStrategies(data) {
+      const card = document.getElementById("strategyCard");
+      if (!data.strategies || !data.strategies.length) { card.style.display = "none"; return; }
+      card.style.display = "block";
+      data.strategies.forEach(s => { strategyNames[s.id] = s.name; });
+      const select = document.getElementById("strategySelect");
+      if (select.options.length !== data.strategies.length) {
+        select.innerHTML = data.strategies.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+      }
+      const active = data.strategies.find(s => s.active) || data.strategies[0];
+      if (document.activeElement !== select) select.value = active.id;
+      const locked = !!data.remote_view || !!data.active_position;
+      select.disabled = locked;
+      document.getElementById("strategyNote").innerText = data.remote_view
+        ? "Switch strategy on the phone console."
+        : (data.active_position ? "A trade is open: switching is locked until it closes." : "");
+      document.getElementById("strategySummary").innerText = active.summary;
+      document.getElementById("activeStrategyName").innerText = active.name;
+      loadStrategyRules().then(() => {
+        const rules = strategyRules[active.id] || [];
+        document.getElementById("strategyRules").innerHTML = rules.map(r => `<li>${esc(r)}</li>`).join("");
+      });
+      document.getElementById("strategyTableBody").innerHTML = data.strategies.map(s => {
+        const d = s.demo, g = s.gate;
+        const pf = d.profit_factor == null ? (d.total_trades ? "no loss yet" : "-") : d.profit_factor;
+        const sign = v => (v >= 0 ? "+" : "") + v;
+        const gate = g.is_live_unlocked ? "UNLOCKED" : `${g.elapsed_hours}/24h, ${g.clean_trades}/20 trades`;
+        return `<tr${s.active ? ' style="background:rgba(59,130,246,0.08);"' : ""}>
+          <td>${esc(s.name)}${s.active ? " &#9679;" : ""}</td>
+          <td>${d.wins}W / ${d.losses}L (${d.total_trades})</td>
+          <td>${d.total_trades ? d.win_rate + "%" : "-"}</td>
+          <td>${d.total_trades ? sign(d.expectancy_r) + "R" : "-"}</td>
+          <td>${pf}</td>
+          <td>${d.total_trades ? sign(d.total_pnl_r) + "R" : "-"}</td>
+          <td>${d.total_trades ? d.max_drawdown_r + "R" : "-"}</td>
+          <td style="color:${g.is_live_unlocked ? "#34d399" : "var(--text-muted)"};">${gate}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    async function selectStrategy(id) {
+      try {
+        const res = await authFetch("/api/strategy", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ strategy_id: id })
+        });
+        const d = await res.json();
+        if (res.ok) { showToast(d.message); }
+        else { showToast(d.detail || "Could not switch strategy", true); }
+      } catch (err) {
+        showToast("Network error", true);
+      }
+      fetchStatus();
+    }
+
     // Only the remote (Vercel) dashboard sends remote_view; on the phone it is absent.
     function renderRemoteBanner(rv) {
       const el = document.getElementById("remoteBanner");
@@ -537,6 +632,7 @@
         if (!res.ok) return;
         const data = await res.json();
         renderRemoteBanner(data.remote_view);
+        renderStrategies(data);
 
         // Update Header Badge
         const badge = document.getElementById("botStatusBadge");
@@ -631,6 +727,7 @@
             <tr>
               <td>#${t.id}</td>
               <td><span class="${t.mode === 'LIVE' ? 'tag-live' : 'tag-demo'}">${t.mode}</span></td>
+              <td style="color: var(--text-muted);">${esc(strategyName(t.strategy))}</td>
               <td class="${t.side === 'Buy' ? 'tag-buy' : 'tag-sell'}">${t.side}</td>
               <td>${t.qty}</td>
               <td>$${t.entry_price.toLocaleString()}</td>

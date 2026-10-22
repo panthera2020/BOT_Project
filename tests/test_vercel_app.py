@@ -166,9 +166,16 @@ def test_commands_require_login(remote):
     assert fake.tables["bot_commands"] == []
 
 
-@pytest.mark.parametrize("path", ["/api/keys", "/api/telegram", "/api/telegram/test", "/api/live/start", "/api/live/stop", "/api/live/enable"])
+@pytest.mark.parametrize("path", ["/api/keys", "/api/telegram", "/api/telegram/test", "/api/live/start", "/api/live/stop", "/api/live/enable", "/api/strategy"])
 def test_secrets_and_live_controls_stay_on_the_phone(remote, path):
     fake, c = remote
     r = c.post(path, auth=AUTH, json={"account_type": "demo", "api_key": "K", "api_secret": "S"})
     assert r.status_code == 403 and "phone" in r.json()["detail"]
     assert fake.requests == []  # nothing was sent to Supabase
+
+
+def test_strategy_rules_are_served_without_asking_the_phone(remote):
+    fake, c = remote
+    data = c.get("/api/strategies", auth=AUTH).json()
+    assert len(data["strategies"]) == 6 and fake.requests == []
+    assert c.get("/api/strategies").status_code == 401

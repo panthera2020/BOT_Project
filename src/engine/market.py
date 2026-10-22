@@ -59,34 +59,32 @@ def aggregate_2m(closed_1m: List[Candle]) -> List[Candle]:
     return out
 
 
-def swing_low_indexes(candles: List[Candle]) -> List[int]:
-    n = FRACTAL
+def swing_low_indexes(candles: List[Candle], n: int = FRACTAL) -> List[int]:
     return [
         i for i in range(n, len(candles) - n)
         if all(candles[i].low < candles[i - k].low and candles[i].low < candles[i + k].low for k in range(1, n + 1))
     ]
 
 
-def swing_high_indexes(candles: List[Candle]) -> List[int]:
-    n = FRACTAL
+def swing_high_indexes(candles: List[Candle], n: int = FRACTAL) -> List[int]:
     return [
         i for i in range(n, len(candles) - n)
         if all(candles[i].high > candles[i - k].high and candles[i].high > candles[i + k].high for k in range(1, n + 1))
     ]
 
 
-def latest_unswept_swing_low(history: List[Candle]) -> Optional[float]:
+def latest_unswept_swing_low(history: List[Candle], n: int = FRACTAL) -> Optional[float]:
     """Most recent confirmed swing low in `history` that no later candle has undercut."""
-    for i in reversed(swing_low_indexes(history)):
+    for i in reversed(swing_low_indexes(history, n)):
         level = history[i].low
         if all(c.low >= level for c in history[i + 1:]):
             return level
     return None
 
 
-def latest_unswept_swing_high(history: List[Candle]) -> Optional[float]:
+def latest_unswept_swing_high(history: List[Candle], n: int = FRACTAL) -> Optional[float]:
     """Most recent confirmed swing high in `history` that no later candle has exceeded."""
-    for i in reversed(swing_high_indexes(history)):
+    for i in reversed(swing_high_indexes(history, n)):
         level = history[i].high
         if all(c.high <= level for c in history[i + 1:]):
             return level
@@ -102,9 +100,9 @@ def authorized_direction(macro: TrendDirection, micro: TrendDirection) -> Option
     return "Buy" if micro == TrendDirection.UP else "Sell"
 
 
-def detect_trend(candles: List[Candle]) -> TrendDirection:
-    highs = [candles[i].high for i in swing_high_indexes(candles)]
-    lows = [candles[i].low for i in swing_low_indexes(candles)]
+def detect_trend(candles: List[Candle], n: int = FRACTAL) -> TrendDirection:
+    highs = [candles[i].high for i in swing_high_indexes(candles, n)]
+    lows = [candles[i].low for i in swing_low_indexes(candles, n)]
     if len(highs) < 2 or len(lows) < 2:
         return TrendDirection.RANGE
     if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
@@ -118,3 +116,49 @@ def round_to_tick(price: float, tick: float) -> float:
     """Round a price to the exchange tick size (Bybit rejects prices off the tick grid)."""
     decimals = max(0, len(f"{tick:.10f}".rstrip("0").split(".")[1])) if tick < 1 else 0
     return round(round(price / tick) * tick, decimals)
+
+
+# ---------------------------------------------------------------- indicators
+def ema(values: Sequence[float], period: int) -> List[Optional[float]]:
+    """Exponential moving average, seeded with the simple average of the first `period`
+    values. The first period-1 entries are None."""
+    out: List[Optional[float]] = [None] * len(values)
+    if period < 1 or len(values) < period:
+        return out
+    k = 2.0 / (period + 1)
+    prev = sum(values[:period]) / period
+    out[period - 1] = prev
+    for i in range(period, len(values)):
+        prev = values[i] * k + prev * (1 - k)
+        out[i] = prev
+    return out
+
+
+def rsi(closes: Sequence[float], period: int = 14) -> Optional[float]:
+    """Wilder's RSI of the latest close, or None with fewer than period+1 closes."""
+    if len(closes) < period + 1:
+        return None
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        change = closes[i] - closes[i - 1]
+        gains += max(change, 0.0)
+        losses += max(-change, 0.0)
+    avg_gain, avg_loss = gains / period, losses / period
+    for i in range(period + 1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        avg_gain = (avg_gain * (period - 1) + max(change, 0.0)) / period
+        avg_loss = (avg_loss * (period - 1) + max(-change, 0.0)) / period
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+
+
+def bollinger(closes: Sequence[float], period: int = 20, k: float = 2.0) -> Optional[tuple]:
+    """(middle, upper, lower) bands of the latest `period` closes (population standard
+    deviation), or None with too few closes."""
+    if len(closes) < period:
+        return None
+    window = list(closes[-period:])
+    mid = sum(window) / period
+    sd = (sum((x - mid) ** 2 for x in window) / period) ** 0.5
+    return mid, mid + k * sd, mid - k * sd

@@ -30,7 +30,9 @@ from src.core.demo_gate import evaluate_demo_gate
 from src.core.trade_stats import TradeStatsTracker
 from src.alerts.notifier import AlertDispatcher
 from src.storage.secrets_box import SecretsBox
+from src.core.strategy_progress import add_clean_trade, get_progress, start_clock_if_needed
 from src.engine.demo_engine import DemoEngine
+from src.engine.strategies import DEFAULT_STRATEGY, REGISTRY, strategy_catalog
 from src.exchange.bybit_adapter import BybitV5Adapter
 from src.storage.state_store import StateStore
 from src.remote.cloud_sync import CloudSync
@@ -89,6 +91,10 @@ RUNTIME_STATE = {
     # What the trading engine must remember across restarts (day's starting capital, the last
     # 15m candle it looked at, an armed sweep setup). Saved with the rest of the state.
     "engine_state": {},
+    # Which strategy the engine runs, and each strategy's own 24h clock / clean-trade count.
+    # (The default strategy's progress is the demo_run_start_time / clean_demo_trade_count above.)
+    "active_strategy": DEFAULT_STRATEGY,
+    "strategy_progress": {},
 }
 
 # Everything the console needs to carry on after a restart is saved to one SQLite file:
@@ -221,7 +227,7 @@ async def load_persisted_state() -> None:
 
         STATS_TRACKER.restore_trades(await store.load_trades())
 
-        gate = evaluate_demo_gate(RUNTIME_STATE["demo_run_start_time"], RUNTIME_STATE["clean_demo_trade_count"])
+        gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, RUNTIME_STATE["active_strategy"]))
         resumed, policy_notes = apply_resume_policy(RUNTIME_STATE, gate.is_unlocked, _auto_resume_live())
         PERSISTENCE_INFO["resumed"] = resumed
         PERSISTENCE_INFO["notes"] = notes + policy_notes
@@ -236,7 +242,7 @@ async def load_persisted_state() -> None:
 #   BOT_ENGINE=off   disables it (used by the tests, or to run the console without trading).
 _ENGINE: Optional[DemoEngine] = None
 _ENGINE_TASK: Optional["asyncio.Task[None]"] = None
-_ENGINE_KEYS: tuple = ("", "")
+_ENGINE_KEYS: tuple = ("", "", DEFAULT_STRATEGY)
 
 
 def _engine_enabled() -> bool:
@@ -274,6 +280,7 @@ def _new_engine() -> DemoEngine:
         record_trade=record_demo_trade,
         notify=_notify_telegram,
         poll_seconds=_engine_poll_seconds(),
+        strategy_id=RUNTIME_STATE["active_strategy"],
     )
 
 
@@ -298,7 +305,7 @@ async def sync_engine() -> None:
     global _ENGINE, _ENGINE_TASK, _ENGINE_KEYS
     wanted = _engine_wanted()
     running = _ENGINE_TASK is not None and not _ENGINE_TASK.done()
-    keys = (RUNTIME_STATE["bybit_demo_keys"]["api_key"], RUNTIME_STATE["bybit_demo_keys"]["api_secret"])
+    keys = (RUNTIME_STATE["bybit_demo_keys"]["api_key"], RUNTIME_STATE["bybit_demo_keys"]["api_secret"], RUNTIME_STATE["active_strategy"])
     if running and (not wanted or keys != _ENGINE_KEYS):
         await _stop_engine()
         running = False
@@ -315,8 +322,8 @@ def _engine_summary() -> Dict[str, Any]:
     if _ENGINE is not None and running:
         base.update({k: _ENGINE.status.get(k) for k in ("text", "last_scan_utc", "last_decision", "last_error", "balance", "trend")})
         base["consecutive_errors"] = _ENGINE.consecutive_errors
-        setup = RUNTIME_STATE["engine_state"].get("setup")
-        base["armed_setup"] = bool(setup)
+        base["strategy"] = _ENGINE.strategy_id
+        base["armed_setup"] = bool(_ENGINE.strategy.slot.get("setup"))
     return base
 
 
@@ -468,6 +475,7 @@ async def record_trade(
     pnl_usd: float,
     pnl_r: float,
     clean: bool = False,
+    strategy: str = DEFAULT_STRATEGY,
 ):
     """Record a closed trade in the stats and save it. A trade that counts toward the
     24h / 20-trade gate is saved together with the new count in one all-or-nothing write,
@@ -481,9 +489,10 @@ async def record_trade(
         exit_price=exit_price,
         pnl_usd=pnl_usd,
         pnl_r=pnl_r,
+        strategy=strategy,
     )
     if clean:
-        RUNTIME_STATE["clean_demo_trade_count"] += 1
+        add_clean_trade(RUNTIME_STATE, strategy)
     if STATE_DB_PATH:
         try:
             async with _SAVE_LOCK:
@@ -504,6 +513,7 @@ async def record_demo_trade(
     pnl_usd: float,
     pnl_r: float,
     clean: bool = True,
+    strategy: str = DEFAULT_STRATEGY,
 ):
     """The one place a closed demo trade is recorded. The trading engine calls this.
 
@@ -511,7 +521,7 @@ async def record_demo_trade(
     20-trade gate. What counts as "clean" is still an open decision in the PRD; the caller
     decides, and the default counts every properly closed trade.
     """
-    return await record_trade("DEMO", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, clean=clean)
+    return await record_trade("DEMO", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, clean=clean, strategy=strategy)
 
 
 async def record_live_trade(
@@ -522,9 +532,10 @@ async def record_live_trade(
     exit_price: float,
     pnl_usd: float,
     pnl_r: float,
+    strategy: str = DEFAULT_STRATEGY,
 ):
     """The one place a closed live trade is recorded. The trading engine calls this."""
-    return await record_trade("LIVE", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r)
+    return await record_trade("LIVE", symbol, side, qty, entry_price, exit_price, pnl_usd, pnl_r, strategy=strategy)
 
 
 def _persistence_status() -> Dict[str, Any]:
@@ -618,14 +629,15 @@ async def get_system_status(user: str = Depends(authenticate_admin)) -> Dict[str
 
 def _build_status() -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
-    gate = evaluate_demo_gate(
-        RUNTIME_STATE["demo_run_start_time"], RUNTIME_STATE["clean_demo_trade_count"], now=now
-    )
+    active = RUNTIME_STATE["active_strategy"]
+    gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, active), now=now)
 
     RUNTIME_STATE["is_live_trading_unlocked"] = gate.is_unlocked
 
-    demo_stats = STATS_TRACKER.get_stats("DEMO")
-    live_stats = STATS_TRACKER.get_stats("LIVE")
+    # The big numbers on the page belong to the selected strategy; every strategy's own
+    # results are listed under "strategies".
+    demo_stats = STATS_TRACKER.get_stats("DEMO", strategy=active)
+    live_stats = STATS_TRACKER.get_stats("LIVE", strategy=active)
     recent_trades = STATS_TRACKER.get_recent_trades(10)
 
     # Market Radar: what the trading engine is really doing right now
@@ -671,7 +683,63 @@ def _build_status() -> Dict[str, Any]:
         "persistence": _persistence_status(),
         "engine": engine_info,
         "cloud": _CLOUD.describe() if _CLOUD else {"configured": False},
+        "active_strategy": active,
+        "strategies": _strategy_overview(now),
     }
+
+
+def _strategy_overview(now: datetime) -> List[Dict[str, Any]]:
+    """Every strategy with its own results and its own live-unlock progress."""
+    out = []
+    for item in strategy_catalog():
+        sid = item["id"]
+        gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, sid), now=now)
+        out.append({
+            "id": sid,
+            "name": item["name"],
+            "summary": item["summary"],
+            "active": sid == RUNTIME_STATE["active_strategy"],
+            "demo": STATS_TRACKER.get_stats("DEMO", strategy=sid),
+            "live": STATS_TRACKER.get_stats("LIVE", strategy=sid),
+            "gate": {
+                "elapsed_hours": gate.elapsed_hours,
+                "clean_trades": gate.clean_trades,
+                "has_24h_run": gate.has_24h_run,
+                "has_20_clean_trades": gate.has_20_clean_trades,
+                "is_live_unlocked": gate.is_unlocked,
+            },
+        })
+    return out
+
+
+@app.get("/api/strategies")
+async def list_strategies(user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
+    """The strategy list with each one's full rules, plus the selected one."""
+    return {"active": RUNTIME_STATE["active_strategy"], "strategies": strategy_catalog()}
+
+
+class StrategyPayload(BaseModel):
+    strategy_id: str
+
+
+@app.post("/api/strategy")
+async def select_strategy(payload: StrategyPayload, user: str = Depends(authenticate_admin)) -> Dict[str, Any]:
+    """Choose which strategy the engine runs. Each strategy keeps its own results and its own
+    24h / 20-trade gate; switching never resets any of them."""
+    sid = payload.strategy_id
+    if sid not in REGISTRY:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown strategy '{sid}'.")
+    if sid == RUNTIME_STATE["active_strategy"]:
+        return {"status": "SUCCESS", "message": f"{REGISTRY[sid].name} is already selected.", "active": sid}
+    if RUNTIME_STATE["active_position"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="A trade is open. Wait for it to close before switching strategy.")
+    if RUNTIME_STATE["live_trading_active"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pause live trading before switching strategy.")
+    RUNTIME_STATE["active_strategy"] = sid
+    await save_console_state()
+    await sync_engine()  # restarts the engine on the new strategy if demo testing is running
+    return {"status": "SUCCESS", "message": f"Switched to {REGISTRY[sid].name}. Its own results and gate are shown.", "active": sid}
 
 
 @app.post("/api/keys")
@@ -729,8 +797,7 @@ async def start_demo_testing(user: str = Depends(authenticate_admin)) -> Dict[st
     """
     # The 24h clock starts the first time demo testing is started and is not reset by
     # pausing, stopping or restarting.
-    if RUNTIME_STATE["demo_run_start_time"] is None:
-        RUNTIME_STATE["demo_run_start_time"] = datetime.now(timezone.utc)
+    start_clock_if_needed(RUNTIME_STATE, RUNTIME_STATE["active_strategy"])
     RUNTIME_STATE["demo_testing_active"] = True
     RUNTIME_STATE["current_mode"] = "DEMO"
     RUNTIME_STATE["is_bot_running"] = True
@@ -762,14 +829,12 @@ async def start_live_trading(user: str = Depends(authenticate_admin)) -> Dict[st
     Starts Live Trading. Strictly locked until demo tests >= 24h and >= 20 clean trades.
     Strictly enforces 2 trades per day cap.
     """
-    gate = evaluate_demo_gate(
-        RUNTIME_STATE["demo_run_start_time"], RUNTIME_STATE["clean_demo_trade_count"]
-    )
+    gate = evaluate_demo_gate(*get_progress(RUNTIME_STATE, RUNTIME_STATE["active_strategy"]))
 
     if not gate.is_unlocked:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Live Trading Locked! Requires >= 24h demo runtime and >= 20 clean trades. "
+            detail=f"Live Trading Locked for {REGISTRY[RUNTIME_STATE['active_strategy']].name}! Requires >= 24h demo runtime and >= 20 clean trades of this strategy. "
                    f"Current: {round(gate.elapsed_hours, 1)}h / {gate.clean_trades} trades.",
         )
 
