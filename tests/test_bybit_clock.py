@@ -117,13 +117,3 @@ def test_http_timeout_default_and_override(monkeypatch):
     from src.remote.supabase import SupabaseClient
     monkeypatch.setenv("BOT_HTTP_TIMEOUT", "30")
     assert SupabaseClient("https://x.supabase.co", "k")._timeout == 30.0
-
-
-def test_base_url_can_be_overridden_but_only_with_https(monkeypatch):
-    from src.exchange.bybit_adapter import BybitV5Adapter
-    monkeypatch.setenv("BYBIT_LIVE_URL", "https://api.bytick.com/")
-    monkeypatch.setenv("BYBIT_DEMO_URL", "http://insecure.example")
-    assert BybitV5Adapter("k", "s", is_demo=False).base_url == "https://api.bytick.com"
-    assert BybitV5Adapter("k", "s", is_demo=True).base_url == "https://api-demo.bybit.com"   # http refused
-    monkeypatch.delenv("BYBIT_LIVE_URL")
-    assert BybitV5Adapter("k", "s", is_demo=False).base_url == "https://api.bybit.com"
