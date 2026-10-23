@@ -35,7 +35,12 @@ class BybitV5Adapter(ExchangeAdapter):
         self.api_secret = api_secret
         self.is_demo = is_demo
         self.recv_window = recv_window
-        self.base_url = self.DEMO_BASE_URL if is_demo else self.LIVE_BASE_URL
+        # BYBIT_DEMO_URL / BYBIT_LIVE_URL let you use another official Bybit domain (for example
+        # https://api.bytick.com) when an ISP blocks the default hostname.
+        override = os.environ.get("BYBIT_DEMO_URL" if is_demo else "BYBIT_LIVE_URL", "").strip().rstrip("/")
+        if override and not override.startswith("https://"):
+            override = ""                       # never send signed requests over plain http
+        self.base_url = override or (self.DEMO_BASE_URL if is_demo else self.LIVE_BASE_URL)
         # Bybit rejects a request stamped more than 1s ahead of its own clock (error 10002).
         # Phone clocks are often off by a second or two, so stamp requests with Bybit's time:
         # offset = Bybit's clock - this device's clock, measured before the first signed
